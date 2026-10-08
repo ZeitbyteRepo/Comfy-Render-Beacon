@@ -35,12 +35,14 @@ Qualified source baseline:
 
 V2 qualified build:
 
-- RAM: 113,648 bytes of 327,680 bytes (34.7%, below the 40% gate)
-- application flash: 1,198,845 bytes of 1,310,720 bytes (91.5%, below the 95% gate)
-- application-partition slack: 111,875 bytes (above the 64 KiB gate)
+- RAM: 113,640 bytes of 327,680 bytes (34.7%, below the 40% gate)
+- application flash: 1,198,589 bytes of 1,310,720 bytes (91.4%, below the 95% gate)
+- application-partition slack: 112,131 bytes (above the 64 KiB gate)
 
 V2 polls `/v2/state`, renders the queue/model/icon left rail, and uses one bounded JPEG buffer
 with direct TJpg drawing for completed-media takeover. It does not contain MP4 or audio decoders.
+State bodies are hard-capped at 12 KiB and JPEG bodies at 64 KiB; JSON storage is released before
+the sole JPEG buffer is allocated.
 Stills hold for 10 seconds, video sequences loop exactly three times, and audio uses the
 host-rendered waveform card.
 

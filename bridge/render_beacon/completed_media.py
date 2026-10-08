@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import os
+import selectors
 import subprocess
 import tempfile
 import threading
@@ -20,7 +22,10 @@ VIDEO_LOOPS = 3
 STILL_HOLD_MS = 10_000
 MAX_FRAMES = 24
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
-MAX_FRAME_BYTES = 196_608
+MAX_FRAME_BYTES = 64 * 1024
+MAX_AUDIO_DURATION_MS = 60 * 60 * 1000
+MAX_AUDIO_SAMPLES = MAX_AUDIO_DURATION_MS * 8
+AUDIO_DECODE_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,12 @@ class AtomicMediaCache:
 
     def put(self, media: CompletedMedia) -> bool:
         size = sum(len(frame) for frame in media.frames)
-        if not media.frames or size > self.max_bytes or any(len(frame) > MAX_FRAME_BYTES for frame in media.frames):
+        if (
+            not media.frames
+            or len(media.frames) > MAX_FRAMES
+            or size > self.max_bytes
+            or any(len(frame) > MAX_FRAME_BYTES for frame in media.frames)
+        ):
             return False
         with self._lock:
             old = self._items.pop(media.media_id, None)
@@ -98,13 +108,20 @@ def _jpeg(image: Image.Image, quality: int = 76) -> bytes:
     canvas = Image.new("RGB", (WIDTH, HEIGHT), (12, 15, 20))
     fitted = ImageOps.contain(ImageOps.exif_transpose(image).convert("RGB"), (WIDTH, HEIGHT))
     canvas.paste(fitted, ((WIDTH - fitted.width) // 2, (HEIGHT - fitted.height) // 2))
-    output = io.BytesIO()
-    canvas.save(output, "JPEG", quality=quality, optimize=True, progressive=False, subsampling=2)
-    payload = output.getvalue()
-    if len(payload) > MAX_FRAME_BYTES:
+    payload = b""
+    for candidate_quality in (quality, 58, 40, 25, 10):
         output = io.BytesIO()
-        canvas.save(output, "JPEG", quality=58, optimize=True, progressive=False, subsampling=2)
+        canvas.save(
+            output,
+            "JPEG",
+            quality=candidate_quality,
+            optimize=True,
+            progressive=False,
+            subsampling=2,
+        )
         payload = output.getvalue()
+        if len(payload) <= MAX_FRAME_BYTES:
+            return payload
     if len(payload) > MAX_FRAME_BYTES:
         raise ValueError("derived JPEG exceeds frame bound")
     return payload
@@ -165,24 +182,62 @@ def audio_derivative(source: bytes, suffix: str = ".wav") -> tuple[tuple[bytes, 
         source_path = Path(directory) / f"source{suffix}"
         source_path.write_bytes(source)
         duration_ms = _probe_duration(source_path)
-        pcm = subprocess.run(
-            ["ffmpeg", "-v", "error", "-i", str(source_path), "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        ).stdout
-    samples = memoryview(pcm).cast("h") if len(pcm) >= 2 else []
+        if duration_ms > MAX_AUDIO_DURATION_MS:
+            raise ValueError("audio duration exceeds bound")
+        columns = WIDTH - 56
+        expected_samples = max(1, round(duration_ms * 8))
+        peaks = [0] * columns
+        sample_index = 0
+        carry = b""
+        deadline = time.monotonic() + AUDIO_DECODE_TIMEOUT_SECONDS
+        process = subprocess.Popen(
+            [
+                "ffmpeg", "-v", "error", "-nostdin", "-i", str(source_path),
+                "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        selector = selectors.DefaultSelector()
+        try:
+            assert process.stdout is not None
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, AUDIO_DECODE_TIMEOUT_SECONDS)
+                if not selector.select(timeout=min(0.25, remaining)):
+                    if process.poll() is not None:
+                        break
+                    continue
+                chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                if not chunk:
+                    break
+                data = carry + chunk
+                usable = len(data) - (len(data) % 2)
+                carry = data[usable:]
+                for value in memoryview(data[:usable]).cast("h"):
+                    if sample_index >= MAX_AUDIO_SAMPLES:
+                        raise ValueError("decoded audio exceeds bound")
+                    column = min(columns - 1, sample_index * columns // expected_samples)
+                    peaks[column] = max(peaks[column], abs(value))
+                    sample_index += 1
+            remaining = max(0.0, deadline - time.monotonic())
+            if process.wait(timeout=remaining) != 0:
+                raise subprocess.CalledProcessError(process.returncode, process.args)
+        except Exception:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            selector.close()
     image = Image.new("RGB", (WIDTH, HEIGHT), (12, 15, 20))
     draw = ImageDraw.Draw(image)
     draw.rectangle((18, 18, WIDTH - 19, HEIGHT - 19), outline=(48, 53, 45), width=2)
     center = HEIGHT // 2
     draw.line((28, center, WIDTH - 29, center), fill=(105, 115, 94), width=1)
-    columns = WIDTH - 56
-    if samples:
-        stride = max(1, len(samples) // columns)
-        for x in range(columns):
-            block = samples[x * stride : min(len(samples), (x + 1) * stride)]
-            peak = max((abs(value) for value in block), default=0)
+    if sample_index:
+        for x, peak in enumerate(peaks):
             height = max(1, round((peak / 32768) * 112))
             draw.line((28 + x, center - height, 28 + x, center + height), fill=(201, 214, 91))
     seconds, millis = divmod(duration_ms, 1000)

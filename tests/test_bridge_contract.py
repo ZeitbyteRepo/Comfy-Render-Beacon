@@ -20,7 +20,7 @@ def test_infer_graph_reports_render_settings_without_prompt_text():
 
     summary = infer_graph(graph)
 
-    assert summary["model"] == "Z-Image"
+    assert summary["model"] == "z_image_turbo_bf16.safetensors"
     assert summary["family"] == "Z-Image"
     assert summary["width"] == 1024
     assert summary["height"] == 768
@@ -107,11 +107,15 @@ def test_api_exposes_only_read_routes():
         assert client.post(f"/v1/{forbidden}").status_code == 404
 
 
-def test_unknown_checkpoint_fails_closed_without_filename_leakage():
+def test_v1_preserves_raw_model_while_family_is_curated_for_v2():
     result = infer_graph({"1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "private/customer/model-v9.safetensors"}}})
-    assert result["model"] == "Unknown model"
+    assert result["model"] == "private/customer/model-v9.safetensors"
     assert result["family"] == "Unknown model"
-    assert "private" not in json.dumps(result)
+
+    observer = ComfyObserver(command_runner=lambda command: "")
+    observer._state["active"] = result
+    assert observer.state()["active"]["model"] == "private/customer/model-v9.safetensors"
+    assert observer.state_v2()["rail"]["model_name"] == "Unknown model"
 
 
 def test_observer_merges_live_read_only_sources():

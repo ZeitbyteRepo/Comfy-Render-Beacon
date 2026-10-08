@@ -108,6 +108,34 @@ def test_completed_takeover_uses_one_jpeg_buffer_and_exact_loop_contract():
     assert "AudioFile" not in source
 
 
+def test_firmware_hard_caps_state_and_jpeg_and_releases_json_before_media():
+    source = source_text()
+    assert "constexpr size_t kMaxStateBytes = 12 * 1024;" in source
+    assert "constexpr size_t kMaxPreviewBytes = 64 * 1024;" in source
+    assert "readBoundedBody(request, payload, kMaxStateBytes)" in source
+    assert "request.getString()" not in source
+    release = source.index("JSON document and response storage are released before JPEG allocation")
+    allocate = source.index("if (beginPendingTakeover) beginTakeover(pendingMedia)")
+    assert release < allocate
+
+
+def test_still_hold_clock_starts_only_after_successful_jpeg_draw():
+    source = source_text()
+    function = source[source.index("void beginTakeover"):source.index("void advanceTakeover")]
+    draw = function.index("if (!fetchTakeoverFrame(0))")
+    clock = function.index("takeoverStartedAt = millis();")
+    assert draw < clock
+    assert "takeoverStartedAt = now" not in function
+
+
+def test_firmware_consumes_monotonic_completion_sequence_once():
+    source = source_text()
+    assert 'stateDocument["completion_sequence"]' in source
+    assert "sequence > lastCompletionSequence" in source
+    assert "lastCompletionSequence = sequence" in source
+    assert 'stateDocument["completion_status"]' in source
+
+
 def test_render_metadata_and_five_instruments_match_approved_layout():
     source = source_text()
 

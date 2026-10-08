@@ -54,6 +54,10 @@ Completed video/audio conversion requires host `ffmpeg` and `ffprobe`. The ESP32
 baseline JPEGs: it never decodes MP4 or audio. See [`docs/api.md`](docs/api.md) for bounds and
 takeover timing.
 
+The bridge resolves completed sources beneath `RENDER_BEACON_OUTPUT_ROOT` (default
+`/srv/ai/data/comfyui/output`) and requests only ComfyUI `type=output`; temp/input paths,
+absolute paths, traversal, and output-root escapes are rejected.
+
 ## Bridge development
 
 Requirements:

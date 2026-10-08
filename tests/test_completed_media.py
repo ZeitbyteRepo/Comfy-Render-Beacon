@@ -8,6 +8,8 @@ from render_beacon.completed_media import (
     AtomicMediaCache,
     CompletedMedia,
     HEIGHT,
+    MAX_FRAME_BYTES,
+    MAX_FRAMES,
     VIDEO_LOOPS,
     WIDTH,
     audio_derivative,
@@ -17,6 +19,7 @@ from render_beacon.completed_media import (
 
 
 def assert_baseline_jpeg(payload: bytes):
+    assert len(payload) <= MAX_FRAME_BYTES
     image = Image.open(io.BytesIO(payload))
     assert image.format == "JPEG"
     assert image.size == (WIDTH, HEIGHT)
@@ -40,6 +43,18 @@ def test_atomic_cache_rejects_oversize_without_partial_install():
     assert cache.get(good.media_id) == good
     assert cache.get(bad.media_id) is None
     assert cache.total_bytes == 40
+
+
+def test_atomic_cache_rejects_more_than_max_frames_without_eviction():
+    cache = AtomicMediaCache(max_bytes=1024, max_items=2)
+    good = CompletedMedia("a" * 16, "image", (b"x",), None, 10_000, 1)
+    too_many = CompletedMedia(
+        "b" * 16, "video", tuple(b"x" for _ in range(MAX_FRAMES + 1)), 1000, 40, 2
+    )
+    assert cache.put(good) is True
+    assert cache.put(too_many) is False
+    assert cache.get(good.media_id) == good
+    assert cache.get(too_many.media_id) is None
 
 
 def test_video_sequence_and_audio_waveform_contract(tmp_path: Path):

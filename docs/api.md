@@ -84,8 +84,12 @@ filenames are never copied into V2. `modality_icon` is the closed enum
 480×320 baseline JPEGs with a 10,000 ms hold. Videos are bounded JPEG sequences whose
 `loop_count` is exactly `3`. Audio is represented only by a 480×320 waveform card and exact
 `duration_ms`; no audio-content endpoint exists. The cache installs a complete derivative
-atomically and is bounded to four items, 4 MiB total, 24 video frames, and 196,608 bytes per
+atomically and is bounded to four items, 4 MiB total, 24 video frames, and 65,536 bytes per
 frame. Missing, malformed, oversized, or unknown media fails closed with `404` or no descriptor.
+
+Each terminal output advances `completion_sequence` once. `completion_status` is `ready` only
+after a complete derivative is installed; conversion failures publish `failed` with
+`completed_media: null`, so a prior completion cannot be replayed as the new result.
 
 ## Progress semantics
 

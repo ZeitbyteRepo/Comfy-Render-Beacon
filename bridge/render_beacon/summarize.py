@@ -174,7 +174,6 @@ def infer_graph(graph: dict[str, Any]) -> dict[str, Any]:
         elif ("saveimage" in lowered or "previewimage" in lowered) and result["media"] == "unknown":
             result["media"] = "image"
     result["family"] = _family(result["model"])
-    result["model"] = result["family"]
     return result
 
 

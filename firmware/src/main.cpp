@@ -58,8 +58,8 @@ constexpr uint16_t kV2PreviewImageX = 143;
 constexpr uint32_t kPollIntervalMs = 500;
 constexpr uint32_t kPreviewIntervalMs = 1500;
 constexpr uint32_t kReconnectIntervalMs = 10000;
-constexpr size_t kMaxStateBytes = 16384;
-constexpr size_t kMaxPreviewBytes = 196608;
+constexpr size_t kMaxStateBytes = 12 * 1024;
+constexpr size_t kMaxPreviewBytes = 64 * 1024;
 constexpr uint8_t kCompletedVideoLoops = 3;
 constexpr uint8_t kMaxCompletedFrames = 24;
 constexpr uint32_t kCompletedCardHoldMs = 10000;
@@ -130,7 +130,7 @@ bool hasLivePreview = false;
 enum class TakeoverKind : uint8_t { None, Still, Video, Audio };
 TakeoverKind takeoverKind = TakeoverKind::None;
 String takeoverMediaId;
-String lastCompletedMediaId;
+uint64_t lastCompletionSequence = 0;
 uint8_t takeoverFrame = 0;
 uint8_t takeoverFrameCount = 0;
 uint8_t takeoverLoops = 0;
@@ -139,6 +139,14 @@ uint32_t takeoverNextFrameAt = 0;
 uint32_t takeoverFrameIntervalMs = 500;
 
 std::vector<uint8_t> jpegBytes;
+
+struct CompletedDescriptor {
+  String mediaId;
+  String kind;
+  int frames = 0;
+  int loopCount = 0;
+  uint32_t frameIntervalMs = 500;
+};
 
 void flushDisplay(lv_disp_drv_t *display, const lv_area_t *area, lv_color_t *pixels) {
   const uint32_t width = area->x2 - area->x1 + 1;
@@ -628,29 +636,25 @@ void endTakeover() {
   lv_refr_now(nullptr);
 }
 
-void beginTakeover(JsonObjectConst media, uint32_t now) {
-  const char *mediaId = media["id"] | "";
-  const char *kind = media["kind"] | "";
-  const int frames = media["frame_count"] | 0;
-  const int loopCount = media["loop_count"] | 0;
-  if (strlen(mediaId) != 16 || frames < 1 || frames > kMaxCompletedFrames) return;
-  if (strcmp(kind, "video") == 0 && loopCount != kCompletedVideoLoops) return;
-  takeoverKind = strcmp(kind, "video") == 0
+void beginTakeover(const CompletedDescriptor &media) {
+  if (media.mediaId.length() != 16 || media.frames < 1 || media.frames > kMaxCompletedFrames) return;
+  if (media.kind == "video" && media.loopCount != kCompletedVideoLoops) return;
+  takeoverKind = media.kind == "video"
                      ? TakeoverKind::Video
-                     : (strcmp(kind, "audio") == 0 ? TakeoverKind::Audio : TakeoverKind::Still);
-  takeoverMediaId = mediaId;
-  takeoverFrameCount = static_cast<uint8_t>(frames);
+                     : (media.kind == "audio" ? TakeoverKind::Audio : TakeoverKind::Still);
+  takeoverMediaId = media.mediaId;
+  takeoverFrameCount = static_cast<uint8_t>(media.frames);
   takeoverFrame = 0;
   takeoverLoops = 0;
-  takeoverStartedAt = now;
-  takeoverFrameIntervalMs = std::max<uint32_t>(40, media["frame_interval_ms"] | 500);
-  takeoverNextFrameAt = now + takeoverFrameIntervalMs;
+  takeoverFrameIntervalMs = std::max<uint32_t>(40, media.frameIntervalMs);
   tft.fillScreen(TFT_BLACK);
   if (!fetchTakeoverFrame(0)) {
     endTakeover();
     return;
   }
-  lastCompletedMediaId = takeoverMediaId;
+  // Hold and animation timing starts only after a complete JPEG draw succeeds.
+  takeoverStartedAt = millis();
+  takeoverNextFrameAt = takeoverStartedAt + takeoverFrameIntervalMs;
 }
 
 void advanceTakeover(uint32_t now) {
@@ -722,57 +726,105 @@ void handleSerialProvisioning() {
   ESP.restart();
 }
 
+bool readBoundedBody(HTTPClient &request, String &body, size_t maxBytes) {
+  const int declared = request.getSize();
+  if (declared > static_cast<int>(maxBytes)) return false;
+  body = "";
+  body.reserve(declared > 0 ? declared : 1024);
+  WiFiClient *stream = request.getStreamPtr();
+  uint8_t chunk[256];
+  size_t received = 0;
+  const uint32_t deadline = millis() + 3500;
+  while ((declared >= 0 ? received < static_cast<size_t>(declared) : stream->connected()) &&
+         static_cast<int32_t>(deadline - millis()) > 0) {
+    const size_t available = stream->available();
+    if (!available) {
+      delay(1);
+      continue;
+    }
+    const size_t count = stream->readBytes(
+        chunk, std::min(sizeof(chunk), available));
+    if (count == 0) continue;
+    if (received + count > maxBytes) return false;
+    body.concat(reinterpret_cast<const char *>(chunk), count);
+    received += count;
+  }
+  return received <= maxBytes &&
+         (declared < 0 ? !stream->connected() : received == static_cast<size_t>(declared));
+}
+
 void updateState() {
-  HTTPClient request;
-  request.setTimeout(3000);
-  if (!request.begin(bridgeUrl + "/v2/state")) return;
-  const int status = request.GET();
-  if (status != HTTP_CODE_OK) {
+  CompletedDescriptor pendingMedia;
+  bool beginPendingTakeover = false;
+  {
+    HTTPClient request;
+    request.setTimeout(3000);
+    if (!request.begin(bridgeUrl + "/v2/state")) return;
+    const int status = request.GET();
+    if (status != HTTP_CODE_OK) {
+      request.end();
+      lastMode = "offline";
+      showProcessRack();
+      showEmptyPipeline("bridge unavailable");
+      return;
+    }
+    String payload;
+    if (!readBoundedBody(request, payload, kMaxStateBytes)) {
+      request.end();
+      lastMode = "offline";
+      showProcessRack();
+      showEmptyPipeline("bridge state too large");
+      return;
+    }
     request.end();
-    lastMode = "offline";
-    showProcessRack();
-    showEmptyPipeline("bridge unavailable");
-    return;
-  }
-  const String payload = request.getString();
-  request.end();
-  DynamicJsonDocument stateDocument(kMaxStateBytes);
-  const DeserializationError error = deserializeJson(stateDocument, payload);
-  if (error) {
-    lastMode = "offline";
-    showProcessRack();
-    showEmptyPipeline("invalid bridge state");
-    return;
-  }
+    DynamicJsonDocument stateDocument(kMaxStateBytes);
+    const DeserializationError error = deserializeJson(stateDocument, payload);
+    payload = String();
+    if (error) {
+      lastMode = "offline";
+      showProcessRack();
+      showEmptyPipeline("invalid bridge state");
+      return;
+    }
 
-  if ((stateDocument["schema_version"] | 0) != 2) {
-    lastMode = "offline";
-    showProcessRack();
-    showEmptyPipeline("unsupported bridge schema");
-    return;
-  }
-  lastMode = String(stateDocument["mode"] | "idle");
-  const char *clock = stateDocument["clock"] | "--:--";
-  lv_label_set_text(clockValueLabel, clock);
-  updateRail(stateDocument["rail"].as<JsonObjectConst>());
-  if (lastMode == "running" && takeoverKind != TakeoverKind::None) endTakeover();
+    if ((stateDocument["schema_version"] | 0) != 2) {
+      lastMode = "offline";
+      showProcessRack();
+      showEmptyPipeline("unsupported bridge schema");
+      return;
+    }
+    lastMode = String(stateDocument["mode"] | "idle");
+    const char *clock = stateDocument["clock"] | "--:--";
+    lv_label_set_text(clockValueLabel, clock);
+    updateRail(stateDocument["rail"].as<JsonObjectConst>());
+    if (lastMode == "running" && takeoverKind != TakeoverKind::None) endTakeover();
 
-  JsonObjectConst pipeline = stateDocument["pipeline"].as<JsonObjectConst>();
-  if (!pipeline.isNull()) {
-    updatePipeline(pipeline);
-  } else {
-    showProcessRack();
-    showEmptyPipeline(lastMode == "offline" ? "bridge unavailable" : "Waiting");
-    lv_label_set_text(renderTimeValueLabel, "--:--");
-  }
-  updateTelemetryV2(stateDocument);
+    JsonObjectConst pipeline = stateDocument["pipeline"].as<JsonObjectConst>();
+    if (!pipeline.isNull()) {
+      updatePipeline(pipeline);
+    } else {
+      showProcessRack();
+      showEmptyPipeline(lastMode == "offline" ? "bridge unavailable" : "Waiting");
+      lv_label_set_text(renderTimeValueLabel, "--:--");
+    }
+    updateTelemetryV2(stateDocument);
 
-  JsonObjectConst completed = stateDocument["completed_media"].as<JsonObjectConst>();
-  const char *completedId = completed["id"] | "";
-  if (lastMode == "completed" && takeoverKind == TakeoverKind::None &&
-      strlen(completedId) == 16 && lastCompletedMediaId != completedId) {
-    beginTakeover(completed, millis());
-  }
+    const uint64_t sequence = stateDocument["completion_sequence"] | static_cast<uint64_t>(0);
+    if (sequence > lastCompletionSequence) {
+      // Consume each completion sequence once, including failures and bad media.
+      lastCompletionSequence = sequence;
+      JsonObjectConst completed = stateDocument["completed_media"].as<JsonObjectConst>();
+      pendingMedia.mediaId = String(completed["id"] | "");
+      pendingMedia.kind = String(completed["kind"] | "");
+      pendingMedia.frames = completed["frame_count"] | 0;
+      pendingMedia.loopCount = completed["loop_count"] | 0;
+      pendingMedia.frameIntervalMs = completed["frame_interval_ms"] | 500;
+      beginPendingTakeover = lastMode == "completed" &&
+                             String(stateDocument["completion_status"] | "none") == "ready" &&
+                             takeoverKind == TakeoverKind::None;
+    }
+  }  // JSON document and response storage are released before JPEG allocation.
+  if (beginPendingTakeover) beginTakeover(pendingMedia);
 }
 
 String configPage(const String &message = "") {

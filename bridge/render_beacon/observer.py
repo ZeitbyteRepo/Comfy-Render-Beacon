@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 import httpx
@@ -53,6 +53,7 @@ class ComfyObserver:
         system_reader: SystemReader = _read_system,
         gpu_manager_path: str | None = None,
         media_cache: AtomicMediaCache | None = None,
+        output_root: str | Path = "/srv/ai/data/comfyui/output",
     ) -> None:
         self.comfy_url = comfy_url.rstrip("/")
         self._http = http_client
@@ -61,8 +62,11 @@ class ComfyObserver:
         self._read_system = system_reader
         self._gpu_manager_path = gpu_manager_path
         self._media_cache = media_cache or AtomicMediaCache()
+        self._output_root = Path(output_root)
         self._completed_media: dict[str, Any] | None = None
         self._completed_source_key: str | None = None
+        self._completion_sequence = 0
+        self._completion_status = "none"
         self._lock = threading.RLock()
         self._queue = {"running_count": 0, "pending_count": 0, "running": [], "pending": []}
         self._history: list[dict[str, Any]] = []
@@ -96,6 +100,47 @@ class ComfyObserver:
             await self._http.aclose()
             self._http = None
 
+    def _safe_output_params(self, output: dict[str, Any]) -> tuple[dict[str, str], str] | None:
+        """Accept only a resolved file below the configured Comfy output root."""
+        filename = output.get("filename")
+        subfolder = output.get("subfolder", "")
+        output_type = output.get("type", "output")
+        if (
+            not isinstance(filename, str)
+            or not isinstance(subfolder, str)
+            or output_type != "output"
+            or not filename
+            or len(filename) > 255
+            or len(subfolder) > 1024
+        ):
+            return None
+        if any(character in filename + subfolder for character in ("\x00", "\\", "?", "#")):
+            return None
+        filename_path = PurePosixPath(filename)
+        folder_path = PurePosixPath(subfolder)
+        if (
+            filename_path.is_absolute()
+            or folder_path.is_absolute()
+            or filename_path.name != filename
+            or any(part in ("", ".", "..") for part in filename_path.parts + folder_path.parts)
+        ):
+            return None
+        try:
+            root = self._output_root.resolve(strict=True)
+            candidate = (root / Path(*folder_path.parts) / filename).resolve(strict=True)
+            candidate.relative_to(root)
+            if not candidate.is_file():
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        normalized_subfolder = "" if subfolder in ("", ".") else folder_path.as_posix()
+        source_key = f"output:{normalized_subfolder}:{filename}"
+        return {
+            "filename": filename,
+            "subfolder": normalized_subfolder,
+            "type": "output",
+        }, source_key
+
     async def _prepare_completed_media(
         self, client: httpx.AsyncClient, history: list[dict[str, Any]]
     ) -> None:
@@ -106,13 +151,25 @@ class ComfyObserver:
         if terminal is None:
             return
         output = terminal["output"]
-        filename = output.get("filename")
         prompt_id = terminal.get("prompt_id")
-        if not isinstance(filename, str) or not isinstance(prompt_id, str):
+        if not isinstance(prompt_id, str):
             return
-        source_key = f"{prompt_id}:{output.get('type', 'output')}:{output.get('subfolder', '')}:{filename}"
-        if source_key == self._completed_source_key:
+        safe_output = self._safe_output_params(output)
+        attempt_key = f"{prompt_id}:invalid-output"
+        source_key = f"{prompt_id}:{safe_output[1]}" if safe_output else attempt_key
+        with self._lock:
+            if source_key == self._completed_source_key:
+                return
+            # Claim every new completion before conversion. A failed conversion
+            # publishes a new sequence with no media instead of replaying stale media.
+            self._completed_source_key = source_key
+            self._completion_sequence += 1
+            self._completion_status = "failed"
+            self._completed_media = None
+        if safe_output is None:
             return
+        params, _ = safe_output
+        filename = params["filename"]
         kind = terminal.get("media")
         suffix = Path(filename).suffix.lower()
         if kind not in ("image", "video", "audio"):
@@ -123,11 +180,6 @@ class ComfyObserver:
             else:
                 kind = "image"
         try:
-            params = {
-                "filename": filename,
-                "subfolder": output.get("subfolder", ""),
-                "type": output.get("type", "output"),
-            }
             source = bytearray()
             async with client.stream("GET", "/view", params=params) as response:
                 response.raise_for_status()
@@ -144,8 +196,9 @@ class ComfyObserver:
             )
             if self._media_cache.put(media):
                 with self._lock:
-                    self._completed_media = media.descriptor()
-                    self._completed_source_key = source_key
+                    if self._completed_source_key == source_key:
+                        self._completed_media = media.descriptor()
+                        self._completion_status = "ready"
         except Exception:
             # Completion media is optional; malformed/unavailable outputs must not
             # take the telemetry observer offline.
@@ -443,6 +496,8 @@ class ComfyObserver:
                 "mode": {"complete": "completed", "failed": "error"}.get(mode, mode),
                 "clock": self._state.get("clock"),
                 "updated_at_ms": self._state.get("updated_at_ms"),
+                "completion_sequence": self._completion_sequence,
+                "completion_status": self._completion_status,
                 "rail": {
                     "queue": {
                         "running": int(queue.get("running_count") or 0),
