@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=480,initial-scale=1">
+<title>Render Beacon — Render Machine v2</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
+:root{--ink:#10120f;--surface:#1a1d18;--surface-2:#252a22;--track:#30352d;--text:#efeee7;--muted:#9da399;--lime:#dbea6f;--blue:#7082c8;--orange:#e66f47;--paper:#e8e8df}
+*{box-sizing:border-box}html,body{margin:0;width:480px;height:320px;overflow:hidden}body{background:var(--ink);color:var(--text);font-family:"Instrument Sans",Arial,sans-serif;font-variant-numeric:tabular-nums}.face{position:relative;width:480px;height:320px;overflow:hidden;cursor:pointer;user-select:none}.brand{position:absolute;left:18px;top:16px;font-size:12px;font-weight:500;color:#b6bbb1}.state{position:absolute;right:18px;top:16px;font-size:11px;color:var(--muted)}.state::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--lime);margin-right:7px;box-shadow:0 0 0 3px rgba(219,234,111,.08)}.machine{position:absolute;left:18px;right:18px;top:45px;height:258px}.chamber{position:absolute;left:0;top:0;width:232px;height:162px;background:var(--surface);overflow:hidden}.corner{position:absolute;width:10px;height:10px;border-color:var(--paper);border-style:solid}.corner.a{left:10px;top:10px;border-width:2px 0 0 2px}.corner.b{right:10px;bottom:10px;border-width:0 2px 2px 0}.canvas{position:absolute;left:46px;top:31px;width:140px;height:94px;background:var(--surface-2);overflow:hidden}.tile{position:absolute;height:16px;animation:assemble 2.9s cubic-bezier(.6,0,.22,1) infinite alternate}.tile.one{left:13px;top:12px;width:76px;background:#dfe5ba;animation-delay:-.2s}.tile.two{left:46px;top:38px;width:79px;background:var(--blue);animation-delay:-1s}.tile.three{left:20px;top:64px;width:105px;background:var(--orange);animation-delay:-1.8s}.scanner{position:absolute;left:36px;top:17px;width:24px;height:14px;background:var(--lime);animation:scan 2.2s ease-in-out infinite alternate;z-index:2}.scanner::before,.scanner::after{content:"";position:absolute;top:5px;width:3px;height:3px;border-radius:50%;background:var(--ink)}.scanner::before{left:6px}.scanner::after{right:6px}.beam{position:absolute;left:47px;top:30px;width:1px;height:97px;background:linear-gradient(var(--lime),transparent);opacity:.55;animation:beam 2.2s ease-in-out infinite alternate}.chamberLabel{position:absolute;left:13px;bottom:14px;font-size:11px;color:var(--muted)}.feed{position:absolute;left:232px;top:72px;width:60px;height:20px;background:var(--surface-2)}.feed::before{content:"";position:absolute;left:7px;right:7px;top:9px;height:2px;background:#444b3f}.packet{position:absolute;top:6px;width:8px;height:8px;animation:feed 1.45s linear infinite}.packet.p1{left:48px;background:var(--lime)}.packet.p2{left:48px;background:var(--orange);animation-delay:-.72s}.drive{position:absolute;right:2px;top:-3px;width:147px;height:147px}.drive svg{position:absolute;inset:0;width:147px;height:147px}.track{stroke:var(--track)}.progress{stroke:var(--orange);stroke-dasharray:222 289;stroke-linecap:round}.mark{stroke:#565d51;stroke-width:1.2}.hub{position:absolute;left:39px;top:39px;width:69px;height:69px;border-radius:50%;background:var(--surface);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}.hub strong{font-size:29px;font-weight:500;letter-spacing:-1.5px;line-height:1}.hub span{font-size:10px;color:var(--muted);margin-top:3px}.orbit{position:absolute;inset:0;animation:orbit 7s linear infinite}.control{position:absolute;width:12px;height:12px;border-radius:50%;box-shadow:0 0 0 3px var(--ink)}.c1{right:19px;top:20px;background:var(--lime)}.c2{right:3px;top:59px;background:var(--blue)}.c3{right:20px;bottom:16px;background:var(--paper)}.node{position:absolute;left:299px;top:151px;font-size:13px;font-weight:500;letter-spacing:-.2px;white-space:nowrap}.node span{font-size:11px;color:var(--muted);font-weight:400;margin-left:7px}.telemetry{position:absolute;left:0;right:0;bottom:0;height:40px;display:grid;grid-template-columns:1fr 1fr 67px;gap:22px}.metric{font-size:11px;color:var(--muted)}.metric b{float:right;color:var(--text);font-weight:500}.bar{clear:both;height:6px;background:var(--surface-2);margin-top:8px}.bar i{display:block;height:100%;background:var(--lime)}.memory .bar i{background:var(--blue)}.temp{text-align:right;font-size:10px;color:var(--muted)}.temp b{display:block;font-size:18px;color:var(--text);font-weight:500;margin-top:2px}.hint{position:absolute;right:18px;bottom:3px;font-size:8px;color:#555b52;opacity:0}.face.idle .state::before{background:#656b62;box-shadow:none}.face.idle .scanner,.face.idle .beam{animation-duration:6s}.face.idle .tile{animation-duration:7s}.face.idle .packet{animation-duration:3.8s}.face.idle .orbit{animation-duration:18s}.face.idle .progress{stroke:#5c6258}.face.idle .stateText::after{content:"waiting on H3"}.face:not(.idle) .stateText::after{content:"rendering · H3"}@keyframes feed{0%{transform:translateX(0) rotate(0)}100%{transform:translateX(-47px) rotate(-180deg)}}@keyframes scan{0%{transform:translateX(0)}100%{transform:translateX(136px)}}@keyframes beam{0%{transform:translateX(0)}100%{transform:translateX(136px)}}@keyframes orbit{to{transform:rotate(360deg)}}@keyframes assemble{0%{transform:translate(-20px,9px);opacity:.25}45%{transform:translate(13px,-4px);opacity:.82}100%{transform:translate(0,0);opacity:1}}@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<main class="face" id="face" aria-label="Render Beacon display concept; click to toggle idle and rendering">
+  <div class="brand">render beacon</div>
+  <div class="state"><span class="stateText"></span></div>
+  <section class="machine">
+    <div class="chamber">
+      <i class="corner a"></i><i class="corner b"></i>
+      <div class="scanner"></div><div class="beam"></div>
+      <div class="canvas"><i class="tile one"></i><i class="tile two"></i><i class="tile three"></i></div>
+      <div class="chamberLabel">preview is assembling</div>
+    </div>
+    <div class="feed"><i class="packet p1"></i><i class="packet p2"></i></div>
+    <div class="drive">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <circle class="track" cx="50" cy="50" r="46" fill="none" stroke-width="5"/>
+        <circle class="progress" cx="50" cy="50" r="46" fill="none" stroke-width="5" transform="rotate(-90 50 50)"/>
+        <line class="mark" x1="50" y1="1" x2="50" y2="5"/><line class="mark" x1="99" y1="50" x2="95" y2="50"/><line class="mark" x1="50" y1="99" x2="50" y2="95"/><line class="mark" x1="1" y1="50" x2="5" y2="50"/>
+      </svg>
+      <div class="orbit"><i class="control c1"></i><i class="control c2"></i><i class="control c3"></i></div>
+      <div class="hub"><strong>77</strong><span>percent</span></div>
+    </div>
+    <div class="node">DoubleBlock<span>18 / 24</span></div>
+    <section class="telemetry">
+      <div class="metric">GPU <b>94%</b><div class="bar"><i style="width:94%"></i></div></div>
+      <div class="metric memory">Memory <b>18.3 GB</b><div class="bar"><i style="width:76%"></i></div></div>
+      <div class="temp">Temperature<b>63°</b></div>
+    </section>
+  </section>
+  <span class="hint">tap to toggle state</span>
+</main>
+<script>document.getElementById('face').addEventListener('click',e=>e.currentTarget.classList.toggle('idle'))</script>
+</body>
+</html>

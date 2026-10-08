@@ -1,0 +1,12 @@
+{
+  "prompt-ok": {
+    "prompt": [1, "prompt-ok", {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "z_image_turbo_bf16.safetensors"}}}, {"client_id": "suite"}, ["9"]],
+    "outputs": {"9": {"images": [{"filename": "ok.png", "subfolder": "tests", "type": "output"}]}},
+    "status": {"status_str": "success", "completed": true, "messages": [["execution_start", {"timestamp": 1000}], ["execution_success", {"timestamp": 6100}]]}
+  },
+  "prompt-error": {
+    "prompt": [2, "prompt-error", {"7": {"class_type": "KSampler", "inputs": {"steps": 20}}}, {"client_id": "suite"}, ["7"]],
+    "outputs": {},
+    "status": {"status_str": "error", "completed": true, "messages": [["execution_start", {"timestamp": 7000}], ["execution_error", {"timestamp": 8000, "node_id": "7", "exception_type": "OutOfMemoryError", "exception_message": "CUDA out of memory while allocating tensor"}]]}
+  }
+}

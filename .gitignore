@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# PlatformIO build and dependency caches
+firmware/.pio/
+
+# Device backups may contain NVS credentials
+backups/
+*.bin
+*.elf
+*.map
+
+# Machine-local agent/editor configuration
+.claude/
+.codex/
+.hermes.md
+
+# Local qualification evidence and logs
+live-progress-verification.json
+*.log
+
+# Unlicensed third-party visual references and generated intermediates
+sketches/marathon-reference-hero.jpg
+sketches/marathon-reference-small.jpg
+sketches/006-render-machine-refined/frames/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
