@@ -526,8 +526,19 @@ bool thumbnailJpegBlock(int16_t x, int16_t y, uint16_t width, uint16_t height,
   return true;
 }
 
+bool validMediaId(const String &mediaId) {
+  if (mediaId.length() != 16) return false;
+  for (size_t index = 0; index < mediaId.length(); ++index) {
+    const char value = mediaId[index];
+    if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool fetchThumbnail(size_t slot, const String &mediaId) {
-  if (slot >= 3 || mediaId.length() != 16 || WiFi.status() != WL_CONNECTED) return false;
+  if (slot >= 3 || !validMediaId(mediaId) || WiFi.status() != WL_CONNECTED) return false;
   HTTPClient request;
   request.setTimeout(2500);
   const String url = bridgeUrl + "/v2/media/" + mediaId + "/thumb.jpg";
@@ -553,24 +564,34 @@ bool fetchThumbnail(size_t slot, const String &mediaId) {
     }
   }
   request.end();
-  if (offset != jpegBytes.size()) return false;
+  if (offset != jpegBytes.size()) {
+    std::vector<uint8_t>().swap(jpegBytes);
+    return false;
+  }
   jpegDrawX = kThumbnailX;
   jpegDrawY = kThumbnailY + slot * (kThumbnailHeight + kThumbnailGap);
   jpegDrawWidth = kThumbnailWidth;
   jpegDrawHeight = kThumbnailHeight;
   TJpgDec.setJpgScale(1);
   TJpgDec.setCallback(thumbnailJpegBlock);
-  return TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+  const bool decoded =
+      TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+  std::vector<uint8_t>().swap(jpegBytes);
+  return decoded;
 }
 
 void updateRecentMedia(JsonArrayConst recent) {
   bool changed = false;
   for (size_t index = 0; index < 3; ++index) {
     String nextId;
-    if (index < recent.size()) {
+    if (recent.size() <= 3 && index < recent.size()) {
       JsonObjectConst item = recent[index].as<JsonObjectConst>();
       nextId = String(item["id"] | "");
-      if (nextId.length() != 16) nextId = "";
+      const String kind = String(item["kind"] | "");
+      if (!validMediaId(nextId) ||
+          (kind != "image" && kind != "video" && kind != "audio")) {
+        nextId = "";
+      }
     }
     if (nextId != recentMediaIds[index]) {
       recentMediaIds[index] = nextId;
@@ -629,10 +650,16 @@ bool fetchTakeoverFrame(uint8_t frame) {
     }
   }
   request.end();
-  if (offset != jpegBytes.size()) return false;
+  if (offset != jpegBytes.size()) {
+    std::vector<uint8_t>().swap(jpegBytes);
+    return false;
+  }
   TJpgDec.setJpgScale(1);
   TJpgDec.setCallback(fullScreenJpegBlock);
-  return TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+  const bool decoded =
+      TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+  std::vector<uint8_t>().swap(jpegBytes);
+  return decoded;
 }
 
 void endTakeover() {
@@ -645,7 +672,7 @@ void endTakeover() {
 }
 
 bool beginTakeover(const CompletedDescriptor &media) {
-  if (media.mediaId.length() != 16 || media.frames < 1 || media.frames > kMaxCompletedFrames) return false;
+  if (!validMediaId(media.mediaId) || media.frames < 1 || media.frames > kMaxCompletedFrames) return false;
   if (media.kind != "image" && media.kind != "video" && media.kind != "audio") return false;
   if (media.kind == "video" && media.loopCount != kCompletedVideoLoops) return false;
   takeoverKind = media.kind == "video"

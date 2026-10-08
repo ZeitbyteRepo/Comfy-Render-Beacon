@@ -85,6 +85,7 @@ class StaticObserver:
             "mode": "idle",
             "rail": {"queue": {"running": 0, "pending": 0}, "model_name": "Unknown model", "modality_icon": "unknown"},
             "completed_media": None,
+            "recent_media": [],
         }
 
     def media_frame(self, media_id: str, index: int):
@@ -106,6 +107,12 @@ def test_api_exposes_only_read_routes():
     assert client.get("/v2/media/0123456789abcdef/frame/0.jpg").content == b"jpeg"
     assert client.get("/v2/media/0123456789abcdef/thumb.jpg").content == b"thumb"
     for path in ["/v1/state", "/v1/queue", "/v1/history", "/v1/preview.jpg"]:
+        assert client.post(path).status_code == 405
+    for path in [
+        "/v2/state",
+        "/v2/media/0123456789abcdef/frame/0.jpg",
+        "/v2/media/0123456789abcdef/thumb.jpg",
+    ]:
         assert client.post(path).status_code == 405
     for forbidden in ["prompt", "interrupt", "free", "clear", "delete", "transition"]:
         assert client.post(f"/v1/{forbidden}").status_code == 404

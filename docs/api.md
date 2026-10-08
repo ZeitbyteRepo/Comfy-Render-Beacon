@@ -85,8 +85,10 @@ filenames are never copied into V2. `modality_icon` is the closed enum
 480×320 baseline JPEGs with a 10,000 ms hold. Videos are bounded JPEG sequences whose
 `loop_count` is exactly `3`. Audio is represented only by a 480×320 waveform card and exact
 `duration_ms`; no audio-content endpoint exists. The cache installs a complete derivative
-atomically and is bounded to four items, 4 MiB total, 24 video frames, and 65,536 bytes per
-frame. Missing, malformed, oversized, or unknown media fails closed with `404` or no descriptor.
+atomically and is bounded to four items, 4 MiB of full derivatives, 24 video frames, and 65,536
+bytes per frame. A separate newest-three thumbnail index retains at most 48 KiB so full-frame
+eviction cannot violate the recent-three UI contract. Missing, malformed, oversized, or unknown
+media fails closed with `404` or no descriptor.
 
 `recent_media` is a newest-first array of at most three descriptors already present in the
 four-item media cache. Each descriptor includes a fixed `/thumb.jpg` URL. Thumbnails are 112×64

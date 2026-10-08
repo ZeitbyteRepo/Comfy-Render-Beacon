@@ -26,6 +26,7 @@ MAX_FRAME_BYTES = 64 * 1024
 THUMB_WIDTH = 112
 THUMB_HEIGHT = 64
 MAX_THUMB_BYTES = 16 * 1024
+MAX_RECENT_THUMBNAILS = 3
 MAX_AUDIO_DURATION_MS = 60 * 60 * 1000
 MAX_AUDIO_SAMPLES = MAX_AUDIO_DURATION_MS * 8
 AUDIO_DECODE_TIMEOUT_SECONDS = 30
@@ -56,8 +57,22 @@ class CompletedMedia:
         return result
 
 
+@dataclass(frozen=True)
+class RecentThumbnail:
+    media_id: str
+    kind: MediaKind
+    payload: bytes
+
+    def descriptor(self) -> dict:
+        return {
+            "id": self.media_id,
+            "kind": self.kind,
+            "thumbnail_url": f"/v2/media/{self.media_id}/thumb.jpg",
+        }
+
+
 class AtomicMediaCache:
-    """Thread-safe all-or-nothing media cache with byte and item bounds."""
+    """Atomic full-media cache plus an independent newest-three thumbnail index."""
 
     def __init__(self, max_bytes: int = 4 * 1024 * 1024, max_items: int = 4) -> None:
         if max_bytes <= 0 or max_items <= 0:
@@ -65,11 +80,12 @@ class AtomicMediaCache:
         self.max_bytes = max_bytes
         self.max_items = max_items
         self._items: OrderedDict[str, CompletedMedia] = OrderedDict()
+        self._thumbnails: OrderedDict[str, RecentThumbnail] = OrderedDict()
         self._bytes = 0
         self._lock = threading.RLock()
 
     def put(self, media: CompletedMedia) -> bool:
-        size = sum(len(frame) for frame in media.frames) + len(media.thumbnail)
+        size = sum(len(frame) for frame in media.frames)
         if (
             not media.frames
             or len(media.frames) > MAX_FRAMES
@@ -82,17 +98,23 @@ class AtomicMediaCache:
         with self._lock:
             old = self._items.pop(media.media_id, None)
             if old is not None:
-                self._bytes -= sum(len(frame) for frame in old.frames) + len(old.thumbnail)
+                self._bytes -= sum(len(frame) for frame in old.frames)
             while self._items and (len(self._items) >= self.max_items or self._bytes + size > self.max_bytes):
                 _, evicted = self._items.popitem(last=False)
-                self._bytes -= sum(len(frame) for frame in evicted.frames) + len(evicted.thumbnail)
+                self._bytes -= sum(len(frame) for frame in evicted.frames)
             if self._bytes + size > self.max_bytes:
                 if old is not None:
                     self._items[old.media_id] = old
-                    self._bytes += sum(len(frame) for frame in old.frames) + len(old.thumbnail)
+                    self._bytes += sum(len(frame) for frame in old.frames)
                 return False
             self._items[media.media_id] = media
             self._bytes += size
+            self._thumbnails.pop(media.media_id, None)
+            self._thumbnails[media.media_id] = RecentThumbnail(
+                media.media_id, media.kind, media.thumbnail
+            )
+            while len(self._thumbnails) > MAX_RECENT_THUMBNAILS:
+                self._thumbnails.popitem(last=False)
             return True
 
     def get(self, media_id: str) -> CompletedMedia | None:
@@ -106,20 +128,27 @@ class AtomicMediaCache:
         return media.frames[index]
 
     def thumbnail(self, media_id: str) -> bytes | None:
-        media = self.get(media_id)
-        return media.thumbnail if media is not None and media.thumbnail else None
+        with self._lock:
+            thumbnail = self._thumbnails.get(media_id)
+            return thumbnail.payload if thumbnail is not None else None
 
     def recent_descriptors(self, limit: int = 3) -> list[dict]:
         with self._lock:
-            bounded = max(0, min(limit, 3))
-            return [item.descriptor() for item in reversed(tuple(self._items.values()))][
-                :bounded
-            ]
+            bounded = max(0, min(limit, MAX_RECENT_THUMBNAILS))
+            return [
+                item.descriptor()
+                for item in reversed(tuple(self._thumbnails.values()))
+            ][:bounded]
 
     @property
     def total_bytes(self) -> int:
         with self._lock:
             return self._bytes
+
+    @property
+    def thumbnail_bytes(self) -> int:
+        with self._lock:
+            return sum(len(item.payload) for item in self._thumbnails.values())
 
 
 def _jpeg(image: Image.Image, quality: int = 76) -> bytes:

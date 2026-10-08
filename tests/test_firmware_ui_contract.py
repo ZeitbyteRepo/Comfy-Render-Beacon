@@ -62,6 +62,9 @@ def test_recent_media_uses_three_bounded_right_column_thumbnails():
     assert '"/thumb.jpg"' in source
     assert "kMaxThumbnailBytes = 16 * 1024" in source
     assert "thumbnailRetryAt = now + kTakeoverRetryIntervalMs" in source
+    assert "recent.size() <= 3" in source
+    assert "bool validMediaId(const String &mediaId)" in source
+    assert source.count("std::vector<uint8_t>().swap(jpegBytes);") >= 4
 
 
 def test_firmware_consumes_normalized_pipeline_without_raw_node_names():

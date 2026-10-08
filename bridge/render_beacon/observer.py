@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -72,6 +73,7 @@ class ComfyObserver:
         # completion progress within one bridge lifetime.
         self._bridge_instance_epoch = secrets.token_hex(16)
         self._completion_history_baselined = False
+        self._recent_warm_task: asyncio.Task[None] | None = None
         self._lock = threading.RLock()
         self._queue = {"running_count": 0, "pending_count": 0, "running": [], "pending": []}
         self._history: list[dict[str, Any]] = []
@@ -101,6 +103,11 @@ class ComfyObserver:
         return self._http
 
     async def close(self) -> None:
+        if self._recent_warm_task is not None:
+            self._recent_warm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._recent_warm_task
+            self._recent_warm_task = None
         if self._owns_http and self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -240,7 +247,7 @@ class ComfyObserver:
             params, source_name = safe_output
             source_key = f"{terminal['prompt_id']}:{source_name}"
             media_id = hashlib.sha256(source_key.encode()).hexdigest()[:16]
-            if self._media_cache.get(media_id) is not None:
+            if self._media_cache.thumbnail(media_id) is not None:
                 continue
             filename = params["filename"]
             kind = terminal.get("media")
@@ -270,6 +277,18 @@ class ComfyObserver:
             except Exception:
                 # Historical thumbnails are optional and never take telemetry offline.
                 continue
+
+    def _schedule_recent_media_warm(
+        self, client: httpx.AsyncClient, history: list[dict[str, Any]]
+    ) -> None:
+        """Run at most one history warmer without delaying telemetry polling."""
+
+        if self._recent_warm_task is not None and not self._recent_warm_task.done():
+            return
+        self._recent_warm_task = asyncio.create_task(
+            self._warm_recent_media(client, deepcopy(history)),
+            name="render-beacon-recent-media-warm",
+        )
 
     def _baseline_completed_media(self, history: list[dict[str, Any]]) -> None:
         """Claim bridge-start history without publishing it as a new completion."""
@@ -372,10 +391,11 @@ class ComfyObserver:
                 await self._prepare_completed_media(client, history_summary)
             else:
                 # Existing history predates this process epoch. Do not turn it
-                # into a fresh device event after a bridge restart, but do warm
-                # the bounded visual history used by the three thumbnail slots.
+                # into a fresh device event after a bridge restart.
                 self._baseline_completed_media(history_summary)
-                await self._warm_recent_media(client, history_summary)
+            # Fill startup history and completions that arrived in a burst using
+            # one bounded background worker. Never delay the 500 ms observer.
+            self._schedule_recent_media_warm(client, history_summary)
 
             with self._lock:
                 prior_active = self._state.get("active")

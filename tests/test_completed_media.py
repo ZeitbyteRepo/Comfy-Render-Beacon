@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 from pathlib import Path
 
@@ -51,7 +52,8 @@ def test_atomic_cache_rejects_oversize_without_partial_install():
     assert cache.put(bad) is False
     assert cache.get(good.media_id) == good
     assert cache.get(bad.media_id) is None
-    assert cache.total_bytes == 41
+    assert cache.total_bytes == 40
+    assert cache.thumbnail_bytes == 1
 
 
 def test_atomic_cache_rejects_more_than_max_frames_without_eviction():
@@ -81,7 +83,36 @@ def test_atomic_cache_exposes_only_three_newest_thumbnail_descriptors():
     recent = cache.recent_descriptors(99)
     assert [item["id"] for item in recent] == ["d" * 16, "c" * 16, "b" * 16]
     assert all(item["thumbnail_url"].endswith("/thumb.jpg") for item in recent)
-    assert cache.thumbnail("d" * 16) == b"thumb"
+    assert cache.thumbnail("b" * 16) == b"thumb"
+
+
+def test_recent_three_thumbnails_survive_full_frame_byte_eviction():
+    cache = AtomicMediaCache(max_bytes=80, max_items=4)
+    ids = [character * 16 for character in "abcd"]
+    for index, media_id in enumerate(ids):
+        assert cache.put(
+            CompletedMedia(
+                media_id,
+                "video",
+                (bytes([index]) * 40,),
+                1000,
+                500,
+                index,
+                f"thumb-{index}".encode(),
+            )
+        )
+
+    assert cache.frame(ids[0], 0) is None
+    assert cache.frame(ids[1], 0) is None
+    assert [item["id"] for item in cache.recent_descriptors()] == list(
+        reversed(ids[1:])
+    )
+    assert cache.thumbnail(ids[0]) is None
+    assert cache.thumbnail(ids[1]) == b"thumb-1"
+    assert cache.thumbnail(ids[2]) == b"thumb-2"
+    assert cache.thumbnail(ids[3]) == b"thumb-3"
+    assert cache.total_bytes == 80
+    assert cache.thumbnail_bytes == sum(len(f"thumb-{index}") for index in (1, 2, 3))
 
 
 def test_video_sequence_and_audio_waveform_contract(tmp_path: Path):
@@ -130,6 +161,7 @@ def test_v2_rail_has_exact_fields_and_no_modality_text():
         "modality_icon": "image",
     }
     assert "modality_label" not in str(state)
+    assert len(json.dumps(state, separators=(",", ":")).encode()) <= 12 * 1024
 
 
 def test_v2_bridge_epoch_is_stable_per_instance_and_changes_on_restart():
