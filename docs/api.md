@@ -11,6 +11,8 @@ The API is observational only. It exposes no workload mutation routes.
 | `GET` | `/v1/health` | Bridge and ComfyUI reachability |
 | `GET` | `/v1/state` | Normalized render pipeline and telemetry |
 | `GET` | `/v1/preview.jpg` | Latest bounded JPEG preview, when available |
+| `GET` | `/v2/state` | V2 rail, pipeline, telemetry, and completed-media descriptor |
+| `GET` | `/v2/media/{id}/frame/{n}.jpg` | Bounded completed-media JPEG derivative |
 | `POST` | `/v1/state` | Not allowed; must return `405` |
 
 ## State contract
@@ -69,6 +71,32 @@ While a render or retained terminal state exists, `active.pipeline` is the stabl
 ```
 
 Firmware must consume this normalized object and must not interpret raw ComfyUI node class names.
+
+## V2 display contract
+
+V1 remains available. V2 is an additive, read-only device DTO. Its `rail` object has exactly
+three fields, in display order: `queue`, `model_name`, and `modality_icon`. `model_name` is
+selected from the bridge registry (unknown checkpoints become `Unknown model`); raw checkpoint
+filenames are never copied into V2. `modality_icon` is the closed enum
+`image | video | audio | unknown`; there is no modality text-label field.
+
+`completed_media` is either `null` or a descriptor for GET-only JPEG frames. Stills are exact
+480×320 baseline JPEGs with a 10,000 ms hold. Videos are bounded JPEG sequences whose
+`loop_count` is exactly `3`. Audio is represented only by a 480×320 waveform card and exact
+`duration_ms`; no audio-content endpoint exists. The cache installs a complete derivative
+atomically and is bounded to four items, 4 MiB total, 24 video frames, and 65,536 bytes per
+frame. Missing, malformed, oversized, or unknown media fails closed with `404` or no descriptor.
+
+Each terminal output advances `completion_sequence` once. `completion_status` is `preparing`
+while conversion is in flight and `ready` only after a complete derivative is installed;
+conversion failures publish `failed` with
+`completed_media: null`, so a prior completion cannot be replayed as the new result.
+`bridge_instance_epoch` is an opaque process-boot identifier. It is stable for one bridge
+process and changes after a restart. Devices must rebase to the current `completion_sequence`
+when the epoch changes and must not replay the descriptor present on that first observation.
+Once ready, the newest descriptor remains visible while another render is running so devices
+can retain one pending completion. A device acknowledges a ready sequence only after its first
+frame starts successfully; transient start failures are retried with a finite bound.
 
 ## Progress semantics
 

@@ -77,13 +77,120 @@ def test_firmware_consumes_normalized_pipeline_without_raw_node_names():
     assert "DynamicJsonDocument stateDocument(kMaxStateBytes);" in source
     assert "StaticJsonDocument<kMaxStateBytes> stateDocument;" not in source
     assert "StaticJsonDocument<kMaxStateBytes> document;" not in source
-    assert 'stateDocument["active"]["pipeline"]' in source
+    assert 'stateDocument["pipeline"]' in source
     assert '["master_percent"]' in source
     assert '["active_stage"]' in source
     assert '["stages"]' in source
     assert '["metadata"]' in source
     assert "void updatePipeline(JsonObjectConst pipeline)" in source
     assert "node_class" not in source
+
+
+def test_v2_left_rail_is_queue_model_and_icon_only():
+    source = source_text()
+    assert 'lv_label_set_text(queueCaption, "Queue")' in source
+    assert 'rail["model_name"]' in source
+    assert 'rail["modality_icon"]' in source
+    assert "modalityIconBars[3]" in source
+    assert "modalityLabel" not in source
+    assert "modality_label" not in source
+
+
+def test_completed_takeover_uses_one_jpeg_buffer_and_exact_loop_contract():
+    source = source_text()
+    assert source.count("std::vector<uint8_t> jpegBytes;") == 1
+    assert "constexpr uint8_t kCompletedVideoLoops = 3;" in source
+    assert "takeoverLoops >= kCompletedVideoLoops" in source
+    assert "kCompletedCardHoldMs = 10000" in source
+    assert "TJpgDec.setCallback(fullScreenJpegBlock);" in source
+    assert '"/v2/media/"' in source
+    assert "MP4" not in source
+    assert "AudioFile" not in source
+
+
+def test_firmware_hard_caps_state_and_jpeg_and_releases_json_before_media():
+    source = source_text()
+    assert "constexpr size_t kMaxStateBytes = 12 * 1024;" in source
+    assert "constexpr size_t kMaxPreviewBytes = 64 * 1024;" in source
+    assert "readBoundedBody(request, payload, kMaxStateBytes)" in source
+    assert "request.getString()" not in source
+    release = source.index("JSON document and response storage are released before JPEG allocation")
+    allocate = source.index("tryPendingTakeover(millis())")
+    assert release < allocate
+
+
+def test_still_hold_clock_starts_only_after_successful_jpeg_draw():
+    source = source_text()
+    function = source[source.index("bool beginTakeover"):source.index("void advanceTakeover")]
+    draw = function.index("if (!fetchTakeoverFrame(0))")
+    clock = function.index("takeoverStartedAt = millis();")
+    assert draw < clock
+    assert "takeoverStartedAt = now" not in function
+
+
+def test_running_state_retains_ready_completion_without_acknowledging_it():
+    source = source_text()
+    update = source[source.index("void updateState()"):source.index("String configPage")]
+    retry = source[source.index("void tryPendingTakeover"):source.index("void updateState()")]
+    assert "retainNewestReadyCompletion(sequence, completed);" in update
+    assert 'lastMode == "running"' not in update.split("retainNewestReadyCompletion(sequence, completed);")[0].split("else if", 1)[-1]
+    assert 'lastMode == "running"' in retry
+    assert "lastCompletionSequence = pendingCompletionSequence;" not in retry.split("if (beginTakeover(pendingMedia))")[0]
+
+
+def test_active_takeover_keeps_one_newest_completion_pending_without_interrupt():
+    source = source_text()
+    retain = source[source.index("void retainNewestReadyCompletion"):source.index("void tryPendingTakeover")]
+    retry = source[source.index("void tryPendingTakeover"):source.index("void updateState()")]
+    assert "sequence <= pendingCompletionSequence" in retain
+    assert "pendingCompletionSequence = sequence;" in retain
+    assert "takeoverKind != TakeoverKind::None" in retry
+    assert 'lastMode == "running" && takeoverKind != TakeoverKind::None' not in source
+    assert "takeoverKind == TakeoverKind::None && lastMode == \"running\"" in source
+
+
+def test_completion_acknowledgment_occurs_only_after_successful_takeover_start():
+    source = source_text()
+    begin = source[source.index("bool beginTakeover"):source.index("void advanceTakeover")]
+    retry = source[source.index("void tryPendingTakeover"):source.index("void updateState()")]
+    assert begin.index("if (!fetchTakeoverFrame(0))") < begin.index("return true;")
+    success = retry.index("if (beginTakeover(pendingMedia))")
+    acknowledge = retry.index("lastCompletionSequence = pendingCompletionSequence;")
+    assert success < acknowledge
+
+
+def test_failed_takeover_start_retries_then_is_deliberately_acknowledged():
+    source = source_text()
+    retry = source[source.index("void tryPendingTakeover"):source.index("void updateState()")]
+    assert "constexpr uint8_t kMaxTakeoverStartAttempts = 3;" in source
+    assert "constexpr uint32_t kTakeoverRetryIntervalMs = 2000;" in source
+    assert "++pendingTakeoverAttempts;" in retry
+    assert "pendingTakeoverAttempts >= kMaxTakeoverStartAttempts" in retry
+    assert "pendingTakeoverRetryAt = now + kTakeoverRetryIntervalMs;" in retry
+    assert retry.count("lastCompletionSequence = pendingCompletionSequence;") == 2
+
+
+def test_preparing_sequence_is_not_consumed_before_it_becomes_ready():
+    source = source_text()
+    update = source[source.index("void updateState()"):source.index("String configPage")]
+    preparing = update[update.index("} else if (sequence > pendingCompletionSequence)"):
+                       update.index("    }\n  }  // JSON document")]
+    assert "clearPendingCompletion();" in preparing
+    assert "lastCompletionSequence = sequence;" not in preparing
+
+
+def test_bridge_epoch_change_rebases_sequence_and_clears_pending_without_replay():
+    source = source_text()
+    rebase = source[source.index("void rebaseCompletionEpoch"):source.index("void retainNewestReadyCompletion")]
+    update = source[source.index("void updateState()"):source.index("String configPage")]
+    assert 'stateDocument["bridge_instance_epoch"]' in update
+    assert "bridgeInstanceEpoch = epoch;" in rebase
+    assert "lastCompletionSequence = sequence;" in rebase
+    assert "clearPendingCompletion();" in rebase
+    epoch_branch = update[update.index("if (bridgeInstanceEpoch.isEmpty()"):
+                          update.index("} else if (sequence > lastCompletionSequence")]
+    assert "rebaseCompletionEpoch(epoch, sequence);" in epoch_branch
+    assert "retainNewestReadyCompletion" not in epoch_branch
 
 
 def test_render_metadata_and_five_instruments_match_approved_layout():

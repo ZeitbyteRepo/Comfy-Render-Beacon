@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
+import secrets
 import struct
 import subprocess
 import threading
 import time
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 import httpx
 from PIL import Image, ImageOps
 
+from .completed_media import MAX_SOURCE_BYTES, AtomicMediaCache, build_completed_media
 from .summarize import build_pipeline, cpu_percent, read_cpu_sample, summarize_history, summarize_queue
 
 CommandRunner = Callable[[list[str]], str]
@@ -50,6 +53,8 @@ class ComfyObserver:
         command_runner: CommandRunner = _run,
         system_reader: SystemReader = _read_system,
         gpu_manager_path: str | None = None,
+        media_cache: AtomicMediaCache | None = None,
+        output_root: str | Path = "/srv/ai/data/comfyui/output",
     ) -> None:
         self.comfy_url = comfy_url.rstrip("/")
         self._http = http_client
@@ -57,6 +62,16 @@ class ComfyObserver:
         self._run = command_runner
         self._read_system = system_reader
         self._gpu_manager_path = gpu_manager_path
+        self._media_cache = media_cache or AtomicMediaCache()
+        self._output_root = Path(output_root)
+        self._completed_media: dict[str, Any] | None = None
+        self._completed_source_key: str | None = None
+        self._completion_sequence = 0
+        self._completion_status = "none"
+        # Opaque process identity disambiguates a restart from monotonic
+        # completion progress within one bridge lifetime.
+        self._bridge_instance_epoch = secrets.token_hex(16)
+        self._completion_history_baselined = False
         self._lock = threading.RLock()
         self._queue = {"running_count": 0, "pending_count": 0, "running": [], "pending": []}
         self._history: list[dict[str, Any]] = []
@@ -89,6 +104,140 @@ class ComfyObserver:
         if self._owns_http and self._http is not None:
             await self._http.aclose()
             self._http = None
+
+    def _safe_output_params(self, output: dict[str, Any]) -> tuple[dict[str, str], str] | None:
+        """Accept only a resolved file below the configured Comfy output root."""
+        filename = output.get("filename")
+        subfolder = output.get("subfolder", "")
+        output_type = output.get("type", "output")
+        if (
+            not isinstance(filename, str)
+            or not isinstance(subfolder, str)
+            or output_type != "output"
+            or not filename
+            or len(filename) > 255
+            or len(subfolder) > 1024
+        ):
+            return None
+        if any(character in filename + subfolder for character in ("\x00", "\\", "?", "#")):
+            return None
+        filename_path = PurePosixPath(filename)
+        folder_path = PurePosixPath(subfolder)
+        if (
+            filename_path.is_absolute()
+            or folder_path.is_absolute()
+            or filename_path.name != filename
+            or any(part in ("", ".", "..") for part in filename_path.parts + folder_path.parts)
+        ):
+            return None
+        try:
+            root = self._output_root.resolve(strict=True)
+            candidate = (root / Path(*folder_path.parts) / filename).resolve(strict=True)
+            candidate.relative_to(root)
+            if not candidate.is_file():
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        normalized_subfolder = "" if subfolder in ("", ".") else folder_path.as_posix()
+        source_key = f"output:{normalized_subfolder}:{filename}"
+        return {
+            "filename": filename,
+            "subfolder": normalized_subfolder,
+            "type": "output",
+        }, source_key
+
+    async def _prepare_completed_media(
+        self, client: httpx.AsyncClient, history: list[dict[str, Any]]
+    ) -> None:
+        terminal = next(
+            (item for item in history if item.get("state") == "complete" and isinstance(item.get("output"), dict)),
+            None,
+        )
+        if terminal is None:
+            return
+        output = terminal["output"]
+        prompt_id = terminal.get("prompt_id")
+        if not isinstance(prompt_id, str):
+            return
+        safe_output = self._safe_output_params(output)
+        attempt_key = f"{prompt_id}:invalid-output"
+        source_key = f"{prompt_id}:{safe_output[1]}" if safe_output else attempt_key
+        with self._lock:
+            if source_key == self._completed_source_key:
+                return
+            # Claim every new completion before conversion. Firmware may poll
+            # while conversion is in flight, so distinguish preparing from a
+            # terminal failure without changing the sequence again.
+            self._completed_source_key = source_key
+            self._completion_sequence += 1
+            self._completion_status = "preparing"
+            self._completed_media = None
+        if safe_output is None:
+            with self._lock:
+                if self._completed_source_key == source_key:
+                    self._completion_status = "failed"
+            return
+        params, _ = safe_output
+        filename = params["filename"]
+        kind = terminal.get("media")
+        suffix = Path(filename).suffix.lower()
+        if kind not in ("image", "video", "audio"):
+            if suffix in (".mp4", ".webm", ".mov", ".mkv"):
+                kind = "video"
+            elif suffix in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
+                kind = "audio"
+            else:
+                kind = "image"
+        try:
+            source = bytearray()
+            async with client.stream("GET", "/view", params=params) as response:
+                response.raise_for_status()
+                declared = response.headers.get("content-length")
+                if declared is not None and int(declared) > MAX_SOURCE_BYTES:
+                    raise ValueError("completed source exceeds bound")
+                async for chunk in response.aiter_bytes(64 * 1024):
+                    source.extend(chunk)
+                    if len(source) > MAX_SOURCE_BYTES:
+                        raise ValueError("completed source exceeds bound")
+            media_id = hashlib.sha256(source_key.encode()).hexdigest()[:16]
+            media = await asyncio.to_thread(
+                build_completed_media, media_id, kind, bytes(source), suffix
+            )
+            if self._media_cache.put(media):
+                with self._lock:
+                    if self._completed_source_key == source_key:
+                        self._completed_media = media.descriptor()
+                        self._completion_status = "ready"
+            else:
+                with self._lock:
+                    if self._completed_source_key == source_key:
+                        self._completion_status = "failed"
+        except Exception:
+            # Completion media is optional; malformed/unavailable outputs must not
+            # take the telemetry observer offline.
+            with self._lock:
+                if self._completed_source_key == source_key:
+                    self._completion_status = "failed"
+            return
+
+    def _baseline_completed_media(self, history: list[dict[str, Any]]) -> None:
+        """Claim bridge-start history without publishing it as a new completion."""
+        terminal = next(
+            (item for item in history if item.get("state") == "complete" and isinstance(item.get("output"), dict)),
+            None,
+        )
+        source_key: str | None = None
+        if terminal is not None and isinstance(terminal.get("prompt_id"), str):
+            safe_output = self._safe_output_params(terminal["output"])
+            source_key = (
+                f"{terminal['prompt_id']}:{safe_output[1]}"
+                if safe_output
+                else f"{terminal['prompt_id']}:invalid-output"
+            )
+        with self._lock:
+            if not self._completion_history_baselined:
+                self._completed_source_key = source_key
+                self._completion_history_baselined = True
 
     async def refresh_once(self) -> None:
         client = await self._client()
@@ -167,6 +316,13 @@ class ComfyObserver:
                             next_preview_sequence = sequence
             except Exception:
                 pass
+
+            if self._completion_history_baselined:
+                await self._prepare_completed_media(client, history_summary)
+            else:
+                # Existing history predates this process epoch. Do not turn it
+                # into a fresh device event after a bridge restart.
+                self._baseline_completed_media(history_summary)
 
             with self._lock:
                 prior_active = self._state.get("active")
@@ -356,6 +512,55 @@ class ComfyObserver:
     def state(self) -> dict[str, Any]:
         with self._lock:
             return deepcopy(self._state)
+
+    def state_v2(self) -> dict[str, Any]:
+        with self._lock:
+            active_value = self._state.get("active")
+            active: dict[str, Any] = active_value if isinstance(active_value, dict) else {}
+            queue_value = self._state.get("queue")
+            queue: dict[str, Any] = queue_value if isinstance(queue_value, dict) else {}
+            model_name = str(active.get("family") or active.get("model") or "Unknown model")[:24]
+            if model_name not in {
+                "MiniMax H3", "Qwen Image Edit", "Qwen Image", "Z-Image", "Ideogram",
+                "Krea", "Flux", "LTX", "Wan", "Unknown model",
+            }:
+                model_name = "Unknown model"
+            modality = active.get("media")
+            if modality not in ("image", "video", "audio"):
+                modality = "unknown"
+            mode = self._state.get("mode", "offline")
+            # Keep the newest installed derivative visible while another job
+            # runs so a device can retain it as its one pending completion.
+            completed = deepcopy(self._completed_media)
+            return {
+                "schema_version": 2,
+                "read_only": True,
+                "bridge_instance_epoch": self._bridge_instance_epoch,
+                "mode": {"complete": "completed", "failed": "error"}.get(mode, mode),
+                "clock": self._state.get("clock"),
+                "updated_at_ms": self._state.get("updated_at_ms"),
+                "completion_sequence": self._completion_sequence,
+                "completion_status": self._completion_status,
+                "rail": {
+                    "queue": {
+                        "running": int(queue.get("running_count") or 0),
+                        "pending": int(queue.get("pending_count") or 0),
+                    },
+                    "model_name": model_name,
+                    "modality_icon": modality,
+                },
+                "pipeline": deepcopy(active.get("pipeline")) if active else None,
+                "completed_media": completed,
+                "telemetry": {
+                    "gpu": deepcopy(self._state.get("gpu", {})),
+                    "system": deepcopy(self._state.get("system", {})),
+                },
+            }
+
+    def media_frame(self, media_id: str, index: int) -> bytes | None:
+        if len(media_id) != 16 or any(char not in "0123456789abcdef" for char in media_id):
+            return None
+        return self._media_cache.frame(media_id, index)
 
     def queue(self) -> dict[str, Any]:
         with self._lock:

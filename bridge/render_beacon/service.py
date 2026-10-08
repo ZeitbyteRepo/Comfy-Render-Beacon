@@ -10,6 +10,7 @@ from .observer import ComfyObserver
 observer = ComfyObserver(
     comfy_url=os.getenv("RENDER_BEACON_COMFY_URL", "http://127.0.0.1:8188"),
     gpu_manager_path=os.getenv("RENDER_BEACON_GPU_MANAGER_PATH") or None,
+    output_root=os.getenv("RENDER_BEACON_OUTPUT_ROOT", "/srv/ai/data/comfyui/output"),
 )
 app = create_app(observer)
 
