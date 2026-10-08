@@ -103,3 +103,35 @@ def test_v2_rail_has_exact_fields_and_no_modality_text():
         "modality_icon": "image",
     }
     assert "modality_label" not in str(state)
+
+
+def test_v2_bridge_epoch_is_stable_per_instance_and_changes_on_restart():
+    from render_beacon.observer import ComfyObserver
+
+    first = ComfyObserver(command_runner=lambda command: "")
+    second = ComfyObserver(command_runner=lambda command: "")
+    epoch = first.state_v2()["bridge_instance_epoch"]
+    assert len(epoch) == 32
+    assert first.state_v2()["bridge_instance_epoch"] == epoch
+    assert second.state_v2()["bridge_instance_epoch"] != epoch
+
+
+def test_v2_keeps_newest_ready_descriptor_visible_while_running():
+    from render_beacon.observer import ComfyObserver
+
+    observer = ComfyObserver(command_runner=lambda command: "")
+    descriptor = {
+        "id": "0123456789abcdef",
+        "kind": "image",
+        "frame_count": 1,
+        "loop_count": 1,
+        "frame_interval_ms": 10_000,
+    }
+    observer._completed_media = descriptor
+    observer._completion_sequence = 7
+    observer._completion_status = "ready"
+    observer._state["mode"] = "running"
+    state = observer.state_v2()
+    assert state["mode"] == "running"
+    assert state["completion_sequence"] == 7
+    assert state["completed_media"] == descriptor

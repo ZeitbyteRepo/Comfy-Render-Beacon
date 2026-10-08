@@ -1,6 +1,7 @@
 import asyncio
 import io
 import inspect
+import threading
 from pathlib import Path
 
 import httpx
@@ -126,6 +127,87 @@ def test_failed_new_conversion_clears_old_media_and_is_not_replayed(tmp_path: Pa
     assert repeated["completion_sequence"] == 2
     assert repeated["completed_media"] is None
     assert requests == ["good.png", "bad.png"]
+
+
+def test_bridge_restart_baselines_old_history_without_stale_replay(tmp_path: Path):
+    root = tmp_path / "output"
+    root.mkdir()
+    (root / "old.png").write_bytes(_png_bytes())
+    (root / "new.png").write_bytes(_png_bytes())
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.params["filename"])
+        return httpx.Response(200, content=_png_bytes())
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://comfy"
+        ) as client:
+            observer = ComfyObserver(
+                http_client=client, command_runner=lambda command: "", output_root=root
+            )
+            old = _terminal("prompt-old", "old.png")
+            observer._baseline_completed_media(old)
+            await observer._prepare_completed_media(client, old)
+            stale_state = observer.state_v2()
+            await observer._prepare_completed_media(client, _terminal("prompt-new", "new.png"))
+            return stale_state, observer.state_v2()
+
+    stale, fresh = asyncio.run(exercise())
+    assert stale["completion_sequence"] == 0
+    assert stale["completion_status"] == "none"
+    assert stale["completed_media"] is None
+    assert fresh["completion_sequence"] == 1
+    assert fresh["completion_status"] == "ready"
+    assert fresh["completed_media"] is not None
+    assert requests == ["new.png"]
+
+
+def test_completion_sequence_stays_unconsumed_while_derivative_is_preparing(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "output"
+    root.mkdir()
+    (root / "new.png").write_bytes(_png_bytes())
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_build(media_id, kind, source, suffix):
+        started.set()
+        assert release.wait(timeout=5)
+        return completed_media.CompletedMedia(
+            media_id, "image", (b"jpeg",), None, 10_000, 1
+        )
+
+    monkeypatch.setattr("render_beacon.observer.build_completed_media", delayed_build)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_png_bytes())
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://comfy"
+        ) as client:
+            observer = ComfyObserver(
+                http_client=client, command_runner=lambda command: "", output_root=root
+            )
+            task = asyncio.create_task(
+                observer._prepare_completed_media(client, _terminal("prompt-new", "new.png"))
+            )
+            assert await asyncio.to_thread(started.wait, 5)
+            preparing = observer.state_v2()
+            release.set()
+            await task
+            return preparing, observer.state_v2()
+
+    preparing, ready = asyncio.run(exercise())
+    assert preparing["completion_sequence"] == 1
+    assert preparing["completion_status"] == "preparing"
+    assert preparing["completed_media"] is None
+    assert ready["completion_sequence"] == 1
+    assert ready["completion_status"] == "ready"
+    assert ready["completed_media"] is not None
 
 
 def test_audio_derivative_streams_pcm_with_explicit_bounds():

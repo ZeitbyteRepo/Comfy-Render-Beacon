@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import secrets
 import struct
 import subprocess
 import threading
@@ -67,6 +68,10 @@ class ComfyObserver:
         self._completed_source_key: str | None = None
         self._completion_sequence = 0
         self._completion_status = "none"
+        # Opaque process identity disambiguates a restart from monotonic
+        # completion progress within one bridge lifetime.
+        self._bridge_instance_epoch = secrets.token_hex(16)
+        self._completion_history_baselined = False
         self._lock = threading.RLock()
         self._queue = {"running_count": 0, "pending_count": 0, "running": [], "pending": []}
         self._history: list[dict[str, Any]] = []
@@ -160,13 +165,17 @@ class ComfyObserver:
         with self._lock:
             if source_key == self._completed_source_key:
                 return
-            # Claim every new completion before conversion. A failed conversion
-            # publishes a new sequence with no media instead of replaying stale media.
+            # Claim every new completion before conversion. Firmware may poll
+            # while conversion is in flight, so distinguish preparing from a
+            # terminal failure without changing the sequence again.
             self._completed_source_key = source_key
             self._completion_sequence += 1
-            self._completion_status = "failed"
+            self._completion_status = "preparing"
             self._completed_media = None
         if safe_output is None:
+            with self._lock:
+                if self._completed_source_key == source_key:
+                    self._completion_status = "failed"
             return
         params, _ = safe_output
         filename = params["filename"]
@@ -199,10 +208,36 @@ class ComfyObserver:
                     if self._completed_source_key == source_key:
                         self._completed_media = media.descriptor()
                         self._completion_status = "ready"
+            else:
+                with self._lock:
+                    if self._completed_source_key == source_key:
+                        self._completion_status = "failed"
         except Exception:
             # Completion media is optional; malformed/unavailable outputs must not
             # take the telemetry observer offline.
+            with self._lock:
+                if self._completed_source_key == source_key:
+                    self._completion_status = "failed"
             return
+
+    def _baseline_completed_media(self, history: list[dict[str, Any]]) -> None:
+        """Claim bridge-start history without publishing it as a new completion."""
+        terminal = next(
+            (item for item in history if item.get("state") == "complete" and isinstance(item.get("output"), dict)),
+            None,
+        )
+        source_key: str | None = None
+        if terminal is not None and isinstance(terminal.get("prompt_id"), str):
+            safe_output = self._safe_output_params(terminal["output"])
+            source_key = (
+                f"{terminal['prompt_id']}:{safe_output[1]}"
+                if safe_output
+                else f"{terminal['prompt_id']}:invalid-output"
+            )
+        with self._lock:
+            if not self._completion_history_baselined:
+                self._completed_source_key = source_key
+                self._completion_history_baselined = True
 
     async def refresh_once(self) -> None:
         client = await self._client()
@@ -282,7 +317,12 @@ class ComfyObserver:
             except Exception:
                 pass
 
-            await self._prepare_completed_media(client, history_summary)
+            if self._completion_history_baselined:
+                await self._prepare_completed_media(client, history_summary)
+            else:
+                # Existing history predates this process epoch. Do not turn it
+                # into a fresh device event after a bridge restart.
+                self._baseline_completed_media(history_summary)
 
             with self._lock:
                 prior_active = self._state.get("active")
@@ -489,10 +529,13 @@ class ComfyObserver:
             if modality not in ("image", "video", "audio"):
                 modality = "unknown"
             mode = self._state.get("mode", "offline")
-            completed = deepcopy(self._completed_media) if mode in ("complete", "idle") else None
+            # Keep the newest installed derivative visible while another job
+            # runs so a device can retain it as its one pending completion.
+            completed = deepcopy(self._completed_media)
             return {
                 "schema_version": 2,
                 "read_only": True,
+                "bridge_instance_epoch": self._bridge_instance_epoch,
                 "mode": {"complete": "completed", "failed": "error"}.get(mode, mode),
                 "clock": self._state.get("clock"),
                 "updated_at_ms": self._state.get("updated_at_ms"),

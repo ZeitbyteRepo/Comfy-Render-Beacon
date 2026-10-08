@@ -63,6 +63,8 @@ constexpr size_t kMaxPreviewBytes = 64 * 1024;
 constexpr uint8_t kCompletedVideoLoops = 3;
 constexpr uint8_t kMaxCompletedFrames = 24;
 constexpr uint32_t kCompletedCardHoldMs = 10000;
+constexpr uint8_t kMaxTakeoverStartAttempts = 3;
+constexpr uint32_t kTakeoverRetryIntervalMs = 2000;
 constexpr char kDefaultBridgeUrl[] = "http://192.168.1.2:8220";
 
 constexpr uint32_t kInk = 0x10120F;
@@ -130,6 +132,7 @@ bool hasLivePreview = false;
 enum class TakeoverKind : uint8_t { None, Still, Video, Audio };
 TakeoverKind takeoverKind = TakeoverKind::None;
 String takeoverMediaId;
+String bridgeInstanceEpoch;
 uint64_t lastCompletionSequence = 0;
 uint8_t takeoverFrame = 0;
 uint8_t takeoverFrameCount = 0;
@@ -147,6 +150,11 @@ struct CompletedDescriptor {
   int loopCount = 0;
   uint32_t frameIntervalMs = 500;
 };
+
+CompletedDescriptor pendingMedia;
+uint64_t pendingCompletionSequence = 0;
+uint8_t pendingTakeoverAttempts = 0;
+uint32_t pendingTakeoverRetryAt = 0;
 
 void flushDisplay(lv_disp_drv_t *display, const lv_area_t *area, lv_color_t *pixels) {
   const uint32_t width = area->x2 - area->x1 + 1;
@@ -636,9 +644,10 @@ void endTakeover() {
   lv_refr_now(nullptr);
 }
 
-void beginTakeover(const CompletedDescriptor &media) {
-  if (media.mediaId.length() != 16 || media.frames < 1 || media.frames > kMaxCompletedFrames) return;
-  if (media.kind == "video" && media.loopCount != kCompletedVideoLoops) return;
+bool beginTakeover(const CompletedDescriptor &media) {
+  if (media.mediaId.length() != 16 || media.frames < 1 || media.frames > kMaxCompletedFrames) return false;
+  if (media.kind != "image" && media.kind != "video" && media.kind != "audio") return false;
+  if (media.kind == "video" && media.loopCount != kCompletedVideoLoops) return false;
   takeoverKind = media.kind == "video"
                      ? TakeoverKind::Video
                      : (media.kind == "audio" ? TakeoverKind::Audio : TakeoverKind::Still);
@@ -650,11 +659,12 @@ void beginTakeover(const CompletedDescriptor &media) {
   tft.fillScreen(TFT_BLACK);
   if (!fetchTakeoverFrame(0)) {
     endTakeover();
-    return;
+    return false;
   }
   // Hold and animation timing starts only after a complete JPEG draw succeeds.
   takeoverStartedAt = millis();
   takeoverNextFrameAt = takeoverStartedAt + takeoverFrameIntervalMs;
+  return true;
 }
 
 void advanceTakeover(uint32_t now) {
@@ -753,9 +763,57 @@ bool readBoundedBody(HTTPClient &request, String &body, size_t maxBytes) {
          (declared < 0 ? !stream->connected() : received == static_cast<size_t>(declared));
 }
 
+void clearPendingCompletion() {
+  pendingMedia = CompletedDescriptor();
+  pendingCompletionSequence = 0;
+  pendingTakeoverAttempts = 0;
+  pendingTakeoverRetryAt = 0;
+}
+
+void rebaseCompletionEpoch(const String &epoch, uint64_t sequence) {
+  bridgeInstanceEpoch = epoch;
+  lastCompletionSequence = sequence;
+  // The bridge may rediscover historical output after a restart. Baseline the
+  // new sequence space instead of replaying whatever happened to be current.
+  clearPendingCompletion();
+}
+
+void retainNewestReadyCompletion(uint64_t sequence, JsonObjectConst completed) {
+  if (sequence <= lastCompletionSequence || sequence <= pendingCompletionSequence) return;
+  pendingMedia.mediaId = String(completed["id"] | "");
+  pendingMedia.kind = String(completed["kind"] | "");
+  pendingMedia.frames = completed["frame_count"] | 0;
+  pendingMedia.loopCount = completed["loop_count"] | 0;
+  pendingMedia.frameIntervalMs = completed["frame_interval_ms"] | 500;
+  pendingCompletionSequence = sequence;
+  pendingTakeoverAttempts = 0;
+  pendingTakeoverRetryAt = 0;
+}
+
+void tryPendingTakeover(uint32_t now) {
+  if (pendingCompletionSequence == 0 || takeoverKind != TakeoverKind::None ||
+      lastMode == "running" || static_cast<int32_t>(now - pendingTakeoverRetryAt) < 0) {
+    return;
+  }
+  if (beginTakeover(pendingMedia)) {
+    // A completion is acknowledged only after frame zero has fetched and
+    // drawn successfully. Later polls therefore cannot replay this takeover.
+    lastCompletionSequence = pendingCompletionSequence;
+    clearPendingCompletion();
+    return;
+  }
+  ++pendingTakeoverAttempts;
+  if (pendingTakeoverAttempts >= kMaxTakeoverStartAttempts) {
+    // Deliberately abandon a persistently invalid/unavailable derivative.
+    // This bounds retries while allowing transient manifest/fetch failures.
+    lastCompletionSequence = pendingCompletionSequence;
+    clearPendingCompletion();
+  } else {
+    pendingTakeoverRetryAt = now + kTakeoverRetryIntervalMs;
+  }
+}
+
 void updateState() {
-  CompletedDescriptor pendingMedia;
-  bool beginPendingTakeover = false;
   {
     HTTPClient request;
     request.setTimeout(3000);
@@ -797,8 +855,6 @@ void updateState() {
     const char *clock = stateDocument["clock"] | "--:--";
     lv_label_set_text(clockValueLabel, clock);
     updateRail(stateDocument["rail"].as<JsonObjectConst>());
-    if (lastMode == "running" && takeoverKind != TakeoverKind::None) endTakeover();
-
     JsonObjectConst pipeline = stateDocument["pipeline"].as<JsonObjectConst>();
     if (!pipeline.isNull()) {
       updatePipeline(pipeline);
@@ -809,22 +865,35 @@ void updateState() {
     }
     updateTelemetryV2(stateDocument);
 
+    const String epoch = String(stateDocument["bridge_instance_epoch"] | "");
     const uint64_t sequence = stateDocument["completion_sequence"] | static_cast<uint64_t>(0);
-    if (sequence > lastCompletionSequence) {
-      // Consume each completion sequence once, including failures and bad media.
-      lastCompletionSequence = sequence;
+    if (epoch.isEmpty()) {
+      lastMode = "offline";
+      showProcessRack();
+      showEmptyPipeline("invalid bridge epoch");
+      return;
+    }
+    if (bridgeInstanceEpoch.isEmpty() || epoch != bridgeInstanceEpoch) {
+      rebaseCompletionEpoch(epoch, sequence);
+    } else if (sequence > lastCompletionSequence && sequence > pendingCompletionSequence) {
+      const String completionStatus = String(stateDocument["completion_status"] | "none");
       JsonObjectConst completed = stateDocument["completed_media"].as<JsonObjectConst>();
-      pendingMedia.mediaId = String(completed["id"] | "");
-      pendingMedia.kind = String(completed["kind"] | "");
-      pendingMedia.frames = completed["frame_count"] | 0;
-      pendingMedia.loopCount = completed["loop_count"] | 0;
-      pendingMedia.frameIntervalMs = completed["frame_interval_ms"] | 500;
-      beginPendingTakeover = lastMode == "completed" &&
-                             String(stateDocument["completion_status"] | "none") == "ready" &&
-                             takeoverKind == TakeoverKind::None;
+      if (completionStatus == "ready" && !completed.isNull()) {
+        // Retain one newest completion even while rendering or while another
+        // takeover is active. Eligibility is checked after response release.
+        retainNewestReadyCompletion(sequence, completed);
+      } else if (completionStatus == "failed") {
+        // A terminal conversion failure deliberately consumes the sequence.
+        lastCompletionSequence = sequence;
+        clearPendingCompletion();
+      } else if (sequence > pendingCompletionSequence) {
+        // Conversion is still preparing. Drop a superseded descriptor, but do
+        // not acknowledge this sequence: the same sequence can become ready.
+        clearPendingCompletion();
+      }
     }
   }  // JSON document and response storage are released before JPEG allocation.
-  if (beginPendingTakeover) beginTakeover(pendingMedia);
+  tryPendingTakeover(millis());
 }
 
 String configPage(const String &message = "") {
@@ -948,7 +1017,8 @@ void loop() {
       lastPollAt = now;
       updateState();
     }
-    if (lastMode == "running" && now - lastPreviewAt >= kPreviewIntervalMs) {
+    if (takeoverKind == TakeoverKind::None && lastMode == "running" &&
+        now - lastPreviewAt >= kPreviewIntervalMs) {
       lastPreviewAt = now;
       fetchPreview();
     }

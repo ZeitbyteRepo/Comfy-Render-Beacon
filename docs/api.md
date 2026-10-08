@@ -87,9 +87,16 @@ filenames are never copied into V2. `modality_icon` is the closed enum
 atomically and is bounded to four items, 4 MiB total, 24 video frames, and 65,536 bytes per
 frame. Missing, malformed, oversized, or unknown media fails closed with `404` or no descriptor.
 
-Each terminal output advances `completion_sequence` once. `completion_status` is `ready` only
-after a complete derivative is installed; conversion failures publish `failed` with
+Each terminal output advances `completion_sequence` once. `completion_status` is `preparing`
+while conversion is in flight and `ready` only after a complete derivative is installed;
+conversion failures publish `failed` with
 `completed_media: null`, so a prior completion cannot be replayed as the new result.
+`bridge_instance_epoch` is an opaque process-boot identifier. It is stable for one bridge
+process and changes after a restart. Devices must rebase to the current `completion_sequence`
+when the epoch changes and must not replay the descriptor present on that first observation.
+Once ready, the newest descriptor remains visible while another render is running so devices
+can retain one pending completion. A device acknowledges a ready sequence only after its first
+frame starts successfully; transient start failures are retried with a finite bound.
 
 ## Progress semantics
 

@@ -13,7 +13,7 @@ The qualified target is a Hosyond/LCDWIKI ESP32-32E board with:
 - no PSRAM requirement;
 - no SD-card requirement.
 
-The current firmware uses approximately 34.7% of RAM and 91.3% of the configured application partition. Treat flash headroom as constrained.
+The current firmware uses approximately 34.7% of RAM and 91.5% of the configured application partition. Treat flash headroom as constrained.
 
 ## Architecture
 
@@ -118,7 +118,7 @@ Wi-Fi credentials are not compiled into the source or firmware image. They are e
 
 ```bash
 uv run pytest -q
-# Current baseline: 39 passed
+# Current baseline: 63 passed
 
 cd firmware
 pio run
