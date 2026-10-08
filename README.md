@@ -96,10 +96,10 @@ Requirements:
 
 ```bash
 cd firmware
-pio run
+pio run -e hosyond-esp32-32e-st7796
 ```
 
-A build never implies authorization to flash a connected board. Opening many ESP32 serial adapters toggles DTR/RTS and can reset the device. See [`firmware/README.md`](firmware/README.md) before provisioning or flashing.
+The separate SD registration diagnostic is built only with `pio run -e sd-readonly-probe`; see [`firmware/SD_READONLY_PROBE.md`](firmware/SD_READONLY_PROBE.md). Neither build command flashes hardware. A build never authorizes opening serial, resetting, or flashing a connected board; opening many ESP32 serial adapters toggles DTR/RTS and can reset the device.
 
 Wi-Fi credentials are not compiled into the source or firmware image. They are entered at provisioning time and stored in the ESP32's NVS namespace.
 
@@ -107,10 +107,11 @@ Wi-Fi credentials are not compiled into the source or firmware image. They are e
 
 ```bash
 uv run pytest -q
-# Current baseline: 39 passed
+# Current baseline: 44 passed
 
 cd firmware
-pio run
+pio run -e hosyond-esp32-32e-st7796
+pio run -e sd-readonly-probe
 ```
 
 ## Repository safety
