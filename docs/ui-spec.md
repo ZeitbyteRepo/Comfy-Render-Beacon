@@ -9,40 +9,30 @@
 
 ## Main stage
 
-One continuous `444×162` surface at screen position `(18,45)`.
+The media-aware layout keeps the exact left rail and uses a `352×203` process surface at
+screen position `(110,45)`.
 
 | Element | Screen coordinates | Size |
 |---|---:|---:|
-| Stage rack | `(47,54)` | `246×128` |
-| Three stage bays | rack-local `0,84,168` | `78×128` each |
-| Stage radial | bay-local `(9,32)` | `60×60` |
-| Master radial | `(317,58)` | `116×116` |
-| Metadata strip | `(18,219)` | `444×29` |
+| Master radial | process-local `(57,8)` | `116×116` |
+| Three stage rows | process-local `(10,130)` | `210×20` each, 2 px gaps |
+| Recent-media column | screen `(340,45)` | three `112×64` slots, 4 px gaps |
 
 Geometry invariants:
 
-- Rack-to-master gap: `24 px`.
-- Surface-relative outer margins: `29 px` left and right.
-- Master stroke: `4 px`.
+- Exactly one radial is rendered.
+- Master stroke: `5 px`.
 - Stage numbers are plain `1 / 2 / 3`.
 - Master caption is `Master flow` and remains mechanically centered under the percentage.
+- Stage rows show name, state, and bounded percent/Done text without scan animation.
+- The right column shows the newest three cached outputs as fixed 112×64 thumbnails.
 
 ## Stage states
 
-- Completed: muted desaturated green annulus and completion text.
-- Active: orange annulus, orange top rail, and bounded scan line.
-- Upcoming: outlined/dim treatment.
+- Completed: muted desaturated green row accent and completion text.
+- Active: orange row accent.
+- Upcoming: outlined/dim row treatment.
 - Master radial remains the strongest orange instrument.
-
-The active scan line uses:
-
-- Start y: `23` within the bay.
-- Travel: `68 px`.
-- Range: `23..91`.
-- Period: `1400 ms` triangle wave.
-- Width: `60 px`, matching the radial.
-
-It must never pass through the stage name or status text.
 
 ## Footer telemetry
 
@@ -56,16 +46,13 @@ Five equal-width vertical instruments with `80×4` bars:
 
 Columns use 80 px widths and 11 px gaps across the 444 px surface.
 
-## Preview behavior
+## Thumbnail and takeover behavior
 
-- Process-rack replacement panel: `(47,54)`, `246×128`.
-- Bridge preview maximum: `280×176`.
-- TJpg scale 2 output: up to `140×88`.
-- Centered preview image origin: approximately `(100,74)`.
-- Hide only the three-stage rack and its detail caption.
-- Keep the master radial, metadata strip, top rail, and footer telemetry visible.
-- Force the LVGL hide/show refresh before direct TJpg drawing.
-- Skip scan movement while the rack is hidden to avoid invalidating the direct-drawn preview.
+- Fetch thumbnails only when the newest-three ID list changes, after LVGL flushes slot backgrounds.
+- Retry a failed thumbnail fetch no more often than once every two seconds.
+- Reuse the single bounded JPEG buffer; do not retain three compressed or decoded thumbnail buffers.
+- Fullscreen still/video/audio takeover remains unchanged and preempts thumbnail drawing.
+- Mark thumbnails dirty after takeover so the process screen redraws them exactly once.
 
 ## Typography and LVGL requirements
 

@@ -13,6 +13,7 @@ from render_beacon.completed_media import (
     VIDEO_LOOPS,
     WIDTH,
     audio_derivative,
+    build_completed_media,
     still_derivative,
     video_derivative,
 )
@@ -33,28 +34,54 @@ def test_still_derivative_is_exact_baseline_480x320():
     assert len(frames) == 1
     assert_baseline_jpeg(frames[0])
 
+    completed = build_completed_media("a" * 16, "image", source.getvalue(), ".png")
+    thumbnail = Image.open(io.BytesIO(completed.thumbnail))
+    assert thumbnail.format == "JPEG"
+    assert thumbnail.size == (112, 64)
+    assert completed.descriptor()["thumbnail_url"] == "/v2/media/aaaaaaaaaaaaaaaa/thumb.jpg"
+
 
 def test_atomic_cache_rejects_oversize_without_partial_install():
     cache = AtomicMediaCache(max_bytes=100, max_items=2)
-    good = CompletedMedia("a" * 16, "image", (b"x" * 40,), None, 10_000, 1)
-    bad = CompletedMedia("b" * 16, "video", (b"y" * 60, b"z" * 60), 1000, 500, 2)
+    good = CompletedMedia("a" * 16, "image", (b"x" * 40,), None, 10_000, 1, b"t")
+    bad = CompletedMedia(
+        "b" * 16, "video", (b"y" * 60, b"z" * 60), 1000, 500, 2, b"t"
+    )
     assert cache.put(good) is True
     assert cache.put(bad) is False
     assert cache.get(good.media_id) == good
     assert cache.get(bad.media_id) is None
-    assert cache.total_bytes == 40
+    assert cache.total_bytes == 41
 
 
 def test_atomic_cache_rejects_more_than_max_frames_without_eviction():
     cache = AtomicMediaCache(max_bytes=1024, max_items=2)
-    good = CompletedMedia("a" * 16, "image", (b"x",), None, 10_000, 1)
+    good = CompletedMedia("a" * 16, "image", (b"x",), None, 10_000, 1, b"t")
     too_many = CompletedMedia(
-        "b" * 16, "video", tuple(b"x" for _ in range(MAX_FRAMES + 1)), 1000, 40, 2
+        "b" * 16,
+        "video",
+        tuple(b"x" for _ in range(MAX_FRAMES + 1)),
+        1000,
+        40,
+        2,
+        b"t",
     )
     assert cache.put(good) is True
     assert cache.put(too_many) is False
     assert cache.get(good.media_id) == good
     assert cache.get(too_many.media_id) is None
+
+
+def test_atomic_cache_exposes_only_three_newest_thumbnail_descriptors():
+    cache = AtomicMediaCache(max_bytes=1024, max_items=4)
+    for index, character in enumerate("abcd"):
+        assert cache.put(
+            CompletedMedia(character * 16, "image", (b"frame",), None, 10_000, index, b"thumb")
+        )
+    recent = cache.recent_descriptors(99)
+    assert [item["id"] for item in recent] == ["d" * 16, "c" * 16, "b" * 16]
+    assert all(item["thumbnail_url"].endswith("/thumb.jpg") for item in recent)
+    assert cache.thumbnail("d" * 16) == b"thumb"
 
 
 def test_video_sequence_and_audio_waveform_contract(tmp_path: Path):

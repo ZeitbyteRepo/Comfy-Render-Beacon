@@ -13,6 +13,7 @@ class Observer(Protocol):
     def preview(self) -> bytes | None: ...
     def state_v2(self) -> dict: ...
     def media_frame(self, media_id: str, index: int) -> bytes | None: ...
+    def media_thumbnail(self, media_id: str) -> bytes | None: ...
 
 
 def create_app(observer: Observer) -> FastAPI:
@@ -52,6 +53,17 @@ def create_app(observer: Observer) -> FastAPI:
         payload = observer.media_frame(media_id, index)
         if payload is None:
             raise HTTPException(status_code=404, detail="Media frame not found")
+        return Response(
+            payload,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.get("/v2/media/{media_id}/thumb.jpg")
+    def media_thumbnail(media_id: str) -> Response:
+        payload = observer.media_thumbnail(media_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Media thumbnail not found")
         return Response(
             payload,
             media_type="image/jpeg",

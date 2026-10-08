@@ -26,40 +26,27 @@ constexpr uint16_t kScreenHeight = 320;
 constexpr uint16_t kMainStageX = 18;
 constexpr uint16_t kMainStageY = 45;
 constexpr uint16_t kMainStageWidth = 444;
-constexpr uint16_t kMainStageHeight = 162;
-constexpr uint16_t kStageBayWidth = 78;
-constexpr uint16_t kStageBayHeight = 128;
-constexpr uint16_t kStageRingSize = 60;
+constexpr uint16_t kMainStageHeight = 203;
 constexpr uint16_t kMasterRingSize = 116;
-constexpr uint16_t kRackMasterGap = 24;
-constexpr uint16_t kStageRackX = 29;
-constexpr uint16_t kStageRackY = 9;
-constexpr uint16_t kStageBayGap = 6;
-constexpr uint16_t kMasterX = 299;
-constexpr uint16_t kMasterY = 13;
-constexpr uint16_t kScanStartY = 23;
-constexpr uint16_t kScanTravel = 68;
-constexpr uint16_t kPreviewPanelX = 47;
-constexpr uint16_t kPreviewPanelY = 54;
-constexpr uint16_t kPreviewPanelWidth = 246;
-constexpr uint16_t kPreviewPanelHeight = 128;
-constexpr uint16_t kPreviewDecodedWidth = 140;
-constexpr uint16_t kPreviewDecodedHeight = 88;
-constexpr uint16_t kPreviewImageX = kPreviewPanelX + (kPreviewPanelWidth - kPreviewDecodedWidth) / 2;
-constexpr uint16_t kPreviewImageY = kPreviewPanelY + (kPreviewPanelHeight - kPreviewDecodedHeight) / 2;
 constexpr uint16_t kV2MainStageX = 110;
 constexpr uint16_t kV2MainStageWidth = 352;
-constexpr uint16_t kV2StageRackX = 10;
-constexpr uint16_t kV2StageBayWidth = 58;
-constexpr uint16_t kV2PreviewPanelWidth = 186;
-constexpr uint16_t kV2MasterX = 226;
-constexpr uint16_t kV2MasterRingSize = 100;
-constexpr uint16_t kV2PreviewImageX = 143;
+constexpr uint16_t kMasterX = 57;
+constexpr uint16_t kMasterY = 8;
+constexpr uint16_t kStageLinesX = 10;
+constexpr uint16_t kStageLinesY = 130;
+constexpr uint16_t kStageLineWidth = 210;
+constexpr uint16_t kStageLineHeight = 20;
+constexpr uint16_t kThumbnailX = 340;
+constexpr uint16_t kThumbnailY = 45;
+constexpr uint16_t kThumbnailWidth = 112;
+constexpr uint16_t kThumbnailHeight = 64;
+constexpr uint16_t kThumbnailGap = 4;
 constexpr uint32_t kPollIntervalMs = 500;
 constexpr uint32_t kPreviewIntervalMs = 1500;
 constexpr uint32_t kReconnectIntervalMs = 10000;
 constexpr size_t kMaxStateBytes = 12 * 1024;
 constexpr size_t kMaxPreviewBytes = 64 * 1024;
+constexpr size_t kMaxThumbnailBytes = 16 * 1024;
 constexpr uint8_t kCompletedVideoLoops = 3;
 constexpr uint8_t kMaxCompletedFrames = 24;
 constexpr uint32_t kCompletedCardHoldMs = 10000;
@@ -89,15 +76,13 @@ lv_color_t lvBuffer[kScreenWidth * 12];
 
 lv_obj_t *mainStage;
 lv_obj_t *processRack;
-lv_obj_t *previewPanel;
 lv_obj_t *stageBays[3];
-lv_obj_t *stageArcs[3];
 lv_obj_t *stageIndexLabels[3];
 lv_obj_t *stageRingLabels[3];
 lv_obj_t *stageNameLabels[3];
 lv_obj_t *stageStateLabels[3];
 lv_obj_t *stageTopLines[3];
-lv_obj_t *stageScanLines[3];
+lv_obj_t *thumbnailSlots[3];
 lv_obj_t *masterArc;
 lv_obj_t *masterValueLabel;
 lv_obj_t *masterCaption;
@@ -128,6 +113,13 @@ uint32_t lastPreviewAt = 0;
 uint32_t lastReconnectAt = 0;
 int activeStageIndex = -1;
 bool hasLivePreview = false;
+String recentMediaIds[3];
+bool thumbnailsDirty = true;
+uint32_t thumbnailRetryAt = 0;
+int16_t jpegDrawX = 0;
+int16_t jpegDrawY = 0;
+uint16_t jpegDrawWidth = kScreenWidth;
+uint16_t jpegDrawHeight = kScreenHeight;
 
 enum class TakeoverKind : uint8_t { None, Still, Video, Audio };
 TakeoverKind takeoverKind = TakeoverKind::None;
@@ -227,48 +219,26 @@ void styleStage(size_t index, const char *state, int percent) {
   const bool complete = strcmp(state, "complete") == 0;
   const bool active = strcmp(state, "active") == 0;
   const uint32_t accent = complete ? kDone : (active ? kOrange : kTrack);
-  const uint32_t background = complete ? 0x20251E : (active ? 0x241D17 : kSurface2);
-  setObjectColor(stageBays[index], background);
+  setObjectColor(stageBays[index], active ? 0x241D17 : kSurface2);
   setObjectColor(stageTopLines[index], accent);
-  lv_obj_set_style_arc_color(stageArcs[index], lv_color_hex(kTrack), LV_PART_MAIN);
-  lv_obj_set_style_arc_color(stageArcs[index], lv_color_hex(accent), LV_PART_INDICATOR);
-  lv_arc_set_value(stageArcs[index], percent);
   setLabelColor(stageIndexLabels[index], complete ? kDoneText : (active ? kOrange : kSecondary));
-  setLabelColor(stageRingLabels[index], complete ? kDoneText : (active ? kText : kSecondary));
   setLabelColor(stageNameLabels[index], active ? kText : kSecondary);
-  setLabelColor(stageStateLabels[index], kSecondary);
-  char ringText[12];
-  if (complete) {
-    snprintf(ringText, sizeof(ringText), "Done");
-    lv_label_set_text(stageStateLabels[index], "Complete");
-  } else if (active) {
-    snprintf(ringText, sizeof(ringText), "%d%%", percent);
-    lv_label_set_text(stageStateLabels[index], "Working");
-  } else {
-    snprintf(ringText, sizeof(ringText), "%d%%", percent);
-    lv_label_set_text(stageStateLabels[index], "Waiting");
-  }
-  lv_label_set_text(stageRingLabels[index], ringText);
-  if (active && lastMode == "running" && !hasLivePreview) {
-    lv_obj_clear_flag(stageScanLines[index], LV_OBJ_FLAG_HIDDEN);
-  } else {
-    lv_obj_add_flag(stageScanLines[index], LV_OBJ_FLAG_HIDDEN);
-  }
+  setLabelColor(stageStateLabels[index], complete ? kDoneText : (active ? kOrange : kMuted));
+  setLabelColor(stageRingLabels[index], complete ? kDoneText : (active ? kText : kSecondary));
+  char valueText[12];
+  snprintf(valueText, sizeof(valueText), complete ? "Done" : "%d%%", percent);
+  lv_label_set_text(stageRingLabels[index], valueText);
+  lv_label_set_text(stageStateLabels[index], complete ? "Complete" : (active ? "Active" : "Waiting"));
 }
 
 void showProcessRack() {
   hasLivePreview = false;
-  lv_obj_clear_flag(processRack, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(runDetailLabel, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(previewPanel, LV_OBJ_FLAG_HIDDEN);
 }
 
 void showPreviewPanel() {
-  hasLivePreview = true;
-  lv_obj_add_flag(processRack, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(runDetailLabel, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_clear_flag(previewPanel, LV_OBJ_FLAG_HIDDEN);
-  for (lv_obj_t *line : stageScanLines) lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+  // Recent-completion thumbnails own the right column. Live previews no longer
+  // replace progress instruments on this compact layout.
+  hasLivePreview = false;
 }
 
 void buildUi() {
@@ -288,53 +258,55 @@ void buildUi() {
   lv_label_set_text(renderTimeValueLabel, "--:--");
 
   mainStage = makeBox(screen, kV2MainStageX, kMainStageY, kV2MainStageWidth, kMainStageHeight, kSurface);
-  processRack = makeBox(mainStage, kV2StageRackX, kStageRackY,
-                        3 * kV2StageBayWidth + 2 * kStageBayGap, kStageBayHeight, kSurface);
+  processRack = makeBox(mainStage, kStageLinesX, kStageLinesY,
+                        kStageLineWidth, 3 * kStageLineHeight + 4, kSurface);
 
   const char *defaultNames[3] = {"Prepare", "Generate", "Finish"};
   for (size_t index = 0; index < 3; ++index) {
-    const int x = index * (kV2StageBayWidth + kStageBayGap);
-    stageBays[index] = makeBox(processRack, x, 0, kV2StageBayWidth, kStageBayHeight, kSurface2);
-    stageTopLines[index] = makeBox(stageBays[index], 0, 0, kV2StageBayWidth, 2, kTrack);
-    stageIndexLabels[index] = makeLabel(stageBays[index], 7, 5, 18, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_LEFT);
+    const int y = index * (kStageLineHeight + 2);
+    stageBays[index] = makeBox(processRack, 0, y, kStageLineWidth, kStageLineHeight, kSurface2);
+    stageTopLines[index] = makeBox(stageBays[index], 0, 0, 3, kStageLineHeight, kTrack);
+    stageIndexLabels[index] = makeLabel(stageBays[index], 8, 4, 14,
+                                        &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_LEFT);
     char indexText[2] = {static_cast<char>('1' + index), '\0'};
     lv_label_set_text(stageIndexLabels[index], indexText);
-    stageArcs[index] = makeArc(stageBays[index], 4, 35, 50, 5);
-    stageRingLabels[index] = makeLabel(stageBays[index], 4, 53, 50,
-                                       &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
-    lv_label_set_text(stageRingLabels[index], "0%");
-    stageNameLabels[index] = makeLabel(stageBays[index], 3, 96, kV2StageBayWidth - 6,
-                                       &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
+    stageNameLabels[index] = makeLabel(stageBays[index], 26, 4, 74,
+                                       &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_LEFT);
     lv_label_set_text(stageNameLabels[index], defaultNames[index]);
-    stageStateLabels[index] = makeLabel(stageBays[index], 3, 111, kV2StageBayWidth - 6,
-                                        &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
+    stageStateLabels[index] = makeLabel(stageBays[index], 102, 4, 62,
+                                        &instrument_sans_12, kMuted, LV_TEXT_ALIGN_LEFT);
     lv_label_set_text(stageStateLabels[index], "Waiting");
-    stageScanLines[index] = makeBox(stageBays[index], 9, kScanStartY, kStageRingSize, 1, kOrange);
-    lv_obj_add_flag(stageScanLines[index], LV_OBJ_FLAG_HIDDEN);
+    stageRingLabels[index] = makeLabel(stageBays[index], 164, 4, 38,
+                                       &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_text(stageRingLabels[index], "0%");
   }
 
-  previewPanel = makeBox(mainStage, kV2StageRackX, kStageRackY,
-                         kV2PreviewPanelWidth, kPreviewPanelHeight, kSurface2);
-  lv_obj_add_flag(previewPanel, LV_OBJ_FLAG_HIDDEN);
-  runDetailLabel = makeLabel(mainStage, kV2StageRackX, 145, kV2PreviewPanelWidth,
-                             &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
-  lv_label_set_text(runDetailLabel, "Waiting for pipeline");
-
-  masterArc = makeArc(mainStage, kV2MasterX, 21, kV2MasterRingSize, 4);
-  lv_obj_t *masterHub = makeBox(mainStage, 247, 42, 58, 58, kSurface);
+  masterArc = makeArc(mainStage, kMasterX, kMasterY, kMasterRingSize, 5);
+  lv_obj_t *masterHub = makeBox(mainStage, 86, 37, 58, 58, kSurface);
   lv_obj_set_style_radius(masterHub, LV_RADIUS_CIRCLE, 0);
-  masterValueLabel = makeLabel(mainStage, 247, 48, 58, &instrument_sans_29, kText, LV_TEXT_ALIGN_CENTER);
+  masterValueLabel = makeLabel(mainStage, 86, 43, 58, &instrument_sans_29, kText, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(masterValueLabel, "0%");
-  masterCaption = makeLabel(mainStage, 247, 91, 58, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
+  masterCaption = makeLabel(mainStage, 86, 86, 58, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(masterCaption, "Master flow");
-  activeStageLabel = makeLabel(mainStage, 210, 145, 132, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
+  activeStageLabel = makeLabel(mainStage, 10, 112, 210, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(activeStageLabel, "Waiting");
 
-  renderMetaStrip = makeBox(screen, kV2MainStageX, 219, kV2MainStageWidth, 29, kOrange);
-  modelLabel = makeLabel(renderMetaStrip, 10, 8, 130, &instrument_sans_12, kInk, LV_TEXT_ALIGN_LEFT);
-  lv_label_set_text(modelLabel, "No active model");
-  renderSpecsLabel = makeLabel(renderMetaStrip, 140, 8, 202, &instrument_sans_12, kInk, LV_TEXT_ALIGN_RIGHT);
-  lv_label_set_text(renderSpecsLabel, "Waiting for render metadata");
+  for (size_t index = 0; index < 3; ++index) {
+    thumbnailSlots[index] = makeBox(
+        mainStage, 230, index * (kThumbnailHeight + kThumbnailGap),
+        kThumbnailWidth, kThumbnailHeight, kSurface2);
+    lv_obj_set_style_border_width(thumbnailSlots[index], 1, 0);
+    lv_obj_set_style_border_color(thumbnailSlots[index], lv_color_hex(kTrack), 0);
+  }
+
+  // Retained hidden targets keep the bounded metadata updater simple; model
+  // identity remains visible in the exact three-item left rail.
+  runDetailLabel = makeLabel(mainStage, 0, 0, 1, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_LEFT);
+  modelLabel = makeLabel(mainStage, 0, 0, 1, &instrument_sans_12, kText, LV_TEXT_ALIGN_LEFT);
+  renderSpecsLabel = makeLabel(mainStage, 0, 0, 1, &instrument_sans_12, kText, LV_TEXT_ALIGN_LEFT);
+  lv_obj_add_flag(runDetailLabel, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(modelLabel, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(renderSpecsLabel, LV_OBJ_FLAG_HIDDEN);
 
   const char *metricNames[5] = {"GPU", "CPU", "VRAM", "RAM", "GPU °C"};
   const uint32_t metricColors[5] = {kLime, kOrange, kBlue, kPaper, kOrange};
@@ -393,12 +365,6 @@ void updateRail(JsonObjectConst rail) {
       setObjectColor(modalityIconBars[index], strcmp(icon, "image") == 0 ? kBlue : kMuted);
     }
   }
-}
-
-void animateActiveStage(uint32_t now) {
-  if (activeStageIndex < 0 || activeStageIndex > 2 || hasLivePreview || lastMode != "running") return;
-  const uint16_t travel = triangleWave(now, 1400, kScanTravel);
-  lv_obj_set_y(stageScanLines[activeStageIndex], kScanStartY + travel);
 }
 
 void formatElapsed(uint32_t elapsedMs, char *buffer, size_t size) {
@@ -551,33 +517,32 @@ void updateTelemetryV2(JsonDocument &document) {
   updateMetric(4, temperature * 100 / 90, value);
 }
 
-bool jpegBlock(int16_t x, int16_t y, uint16_t width, uint16_t height, uint16_t *bitmap) {
-  if (x >= kPreviewDecodedWidth || y >= kPreviewDecodedHeight) return false;
-  const uint16_t drawWidth = std::min<uint16_t>(width, kPreviewDecodedWidth - x);
-  const uint16_t drawHeight = std::min<uint16_t>(height, kPreviewDecodedHeight - y);
-  tft.pushImage(kV2PreviewImageX + x, kPreviewImageY + y, drawWidth, drawHeight, bitmap);
+bool thumbnailJpegBlock(int16_t x, int16_t y, uint16_t width, uint16_t height,
+                        uint16_t *bitmap) {
+  if (x >= jpegDrawWidth || y >= jpegDrawHeight) return false;
+  const uint16_t drawWidth = std::min<uint16_t>(width, jpegDrawWidth - x);
+  const uint16_t drawHeight = std::min<uint16_t>(height, jpegDrawHeight - y);
+  tft.pushImage(jpegDrawX + x, jpegDrawY + y, drawWidth, drawHeight, bitmap);
   return true;
 }
 
-bool fetchPreview() {
-  if (lastMode != "running" || WiFi.status() != WL_CONNECTED) return false;
+bool fetchThumbnail(size_t slot, const String &mediaId) {
+  if (slot >= 3 || mediaId.length() != 16 || WiFi.status() != WL_CONNECTED) return false;
   HTTPClient request;
   request.setTimeout(2500);
-  if (!request.begin(bridgeUrl + "/v1/preview.jpg")) return false;
+  const String url = bridgeUrl + "/v2/media/" + mediaId + "/thumb.jpg";
+  if (!request.begin(url)) return false;
   const int status = request.GET();
-  if (status != HTTP_CODE_OK) {
-    request.end();
-    return false;
-  }
   const int length = request.getSize();
-  if (length <= 0 || static_cast<size_t>(length) > kMaxPreviewBytes) {
+  if (status != HTTP_CODE_OK || length <= 0 ||
+      static_cast<size_t>(length) > kMaxThumbnailBytes) {
     request.end();
     return false;
   }
   jpegBytes.resize(length);
   WiFiClient *stream = request.getStreamPtr();
   size_t offset = 0;
-  const uint32_t deadline = millis() + 3500;
+  const uint32_t deadline = millis() + 3000;
   while (offset < jpegBytes.size() && millis() < deadline) {
     const size_t available = stream->available();
     if (available) {
@@ -589,11 +554,44 @@ bool fetchPreview() {
   }
   request.end();
   if (offset != jpegBytes.size()) return false;
-  showPreviewPanel();
-  lv_refr_now(nullptr);
-  TJpgDec.setJpgScale(2);
-  TJpgDec.setCallback(jpegBlock);
+  jpegDrawX = kThumbnailX;
+  jpegDrawY = kThumbnailY + slot * (kThumbnailHeight + kThumbnailGap);
+  jpegDrawWidth = kThumbnailWidth;
+  jpegDrawHeight = kThumbnailHeight;
+  TJpgDec.setJpgScale(1);
+  TJpgDec.setCallback(thumbnailJpegBlock);
   return TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+}
+
+void updateRecentMedia(JsonArrayConst recent) {
+  bool changed = false;
+  for (size_t index = 0; index < 3; ++index) {
+    String nextId;
+    if (index < recent.size()) {
+      JsonObjectConst item = recent[index].as<JsonObjectConst>();
+      nextId = String(item["id"] | "");
+      if (nextId.length() != 16) nextId = "";
+    }
+    if (nextId != recentMediaIds[index]) {
+      recentMediaIds[index] = nextId;
+      changed = true;
+    }
+  }
+  if (changed) {
+    for (lv_obj_t *slot : thumbnailSlots) lv_obj_invalidate(slot);
+    thumbnailsDirty = true;
+    thumbnailRetryAt = 0;
+  }
+}
+
+bool drawRecentThumbnails() {
+  lv_refr_now(nullptr);
+  bool complete = true;
+  for (size_t index = 0; index < 3; ++index) {
+    if (recentMediaIds[index].isEmpty()) continue;
+    if (!fetchThumbnail(index, recentMediaIds[index])) complete = false;
+  }
+  return complete;
 }
 
 bool fullScreenJpegBlock(int16_t x, int16_t y, uint16_t width, uint16_t height,
@@ -640,6 +638,8 @@ bool fetchTakeoverFrame(uint8_t frame) {
 void endTakeover() {
   takeoverKind = TakeoverKind::None;
   takeoverMediaId = "";
+  thumbnailsDirty = true;
+  thumbnailRetryAt = 0;
   lv_obj_invalidate(lv_scr_act());
   lv_refr_now(nullptr);
 }
@@ -864,6 +864,7 @@ void updateState() {
       lv_label_set_text(renderTimeValueLabel, "--:--");
     }
     updateTelemetryV2(stateDocument);
+    updateRecentMedia(stateDocument["recent_media"].as<JsonArrayConst>());
 
     const String epoch = String(stateDocument["bridge_instance_epoch"] | "");
     const uint64_t sequence = stateDocument["completion_sequence"] | static_cast<uint64_t>(0);
@@ -894,6 +895,12 @@ void updateState() {
     }
   }  // JSON document and response storage are released before JPEG allocation.
   tryPendingTakeover(millis());
+  const uint32_t now = millis();
+  if (takeoverKind == TakeoverKind::None && thumbnailsDirty &&
+      static_cast<int32_t>(now - thumbnailRetryAt) >= 0) {
+    thumbnailsDirty = !drawRecentThumbnails();
+    if (thumbnailsDirty) thumbnailRetryAt = now + kTakeoverRetryIntervalMs;
+  }
 }
 
 String configPage(const String &message = "") {
@@ -1006,7 +1013,6 @@ void loop() {
   handleSerialProvisioning();
   if (takeoverKind == TakeoverKind::None) {
     lv_timer_handler();
-    animateActiveStage(now);
   } else {
     advanceTakeover(now);
   }
@@ -1017,11 +1023,7 @@ void loop() {
       lastPollAt = now;
       updateState();
     }
-    if (takeoverKind == TakeoverKind::None && lastMode == "running" &&
-        now - lastPreviewAt >= kPreviewIntervalMs) {
-      lastPreviewAt = now;
-      fetchPreview();
-    }
+
   } else if (wifiSsid.length() && now - lastReconnectAt >= kReconnectIntervalMs) {
     lastReconnectAt = now;
     WiFi.disconnect();

@@ -90,6 +90,9 @@ class StaticObserver:
     def media_frame(self, media_id: str, index: int):
         return b"jpeg" if media_id == "0123456789abcdef" and index == 0 else None
 
+    def media_thumbnail(self, media_id: str):
+        return b"thumb" if media_id == "0123456789abcdef" else None
+
 
 def test_api_exposes_only_read_routes():
     client = TestClient(create_app(StaticObserver()))
@@ -101,6 +104,7 @@ def test_api_exposes_only_read_routes():
     assert client.get("/v1/preview.jpg").status_code == 404
     assert client.get("/v2/state").json()["schema_version"] == 2
     assert client.get("/v2/media/0123456789abcdef/frame/0.jpg").content == b"jpeg"
+    assert client.get("/v2/media/0123456789abcdef/thumb.jpg").content == b"thumb"
     for path in ["/v1/state", "/v1/queue", "/v1/history", "/v1/preview.jpg"]:
         assert client.post(path).status_code == 405
     for forbidden in ["prompt", "interrupt", "free", "clear", "delete", "transition"]:

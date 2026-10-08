@@ -47,6 +47,7 @@ The bridge exposes only:
 - `GET /v1/preview.jpg`
 - `GET /v2/state`
 - `GET /v2/media/{id}/frame/{n}.jpg`
+- `GET /v2/media/{id}/thumb.jpg`
 
 It has no queue, interrupt, delete, upload, prompt-submission, workflow-mutation, or GPU-control route. OpenAPI and interactive documentation are disabled. Full prompt text and full workflow graphs are not returned.
 

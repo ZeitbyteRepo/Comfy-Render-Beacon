@@ -34,41 +34,34 @@ def test_process_rack_geometry_matches_approved_exact_resolution_comp():
     assert "constexpr uint16_t kMainStageX = 18;" in source
     assert "constexpr uint16_t kMainStageY = 45;" in source
     assert "constexpr uint16_t kMainStageWidth = 444;" in source
-    assert "constexpr uint16_t kMainStageHeight = 162;" in source
-    assert "constexpr uint16_t kStageBayWidth = 78;" in source
-    assert "constexpr uint16_t kStageBayHeight = 128;" in source
-    assert "constexpr uint16_t kStageRingSize = 60;" in source
+    assert "constexpr uint16_t kMainStageHeight = 203;" in source
     assert "constexpr uint16_t kMasterRingSize = 116;" in source
-    assert "constexpr uint16_t kRackMasterGap = 24;" in source
+    assert "constexpr uint16_t kStageLineWidth = 210;" in source
+    assert "constexpr uint16_t kStageLineHeight = 20;" in source
     assert "lv_obj_t *stageBays[3];" in source
-    assert "lv_obj_t *stageArcs[3];" in source
+    assert "lv_obj_t *stageArcs[3];" not in source
     assert "lv_obj_t *stageIndexLabels[3];" in source
     assert "lv_obj_t *stageNameLabels[3];" in source
     assert "lv_obj_t *stageStateLabels[3];" in source
 
 
-def test_active_scan_motion_is_bounded_to_radial_zone():
+def test_three_stage_rows_replace_stage_radials_and_scan_animation():
     source = source_text()
-
-    assert "constexpr uint16_t kScanStartY = 23;" in source
-    assert "constexpr uint16_t kScanTravel = 68;" in source
-    assert "lv_obj_t *stageScanLines[3];" in source
-    assert "void animateActiveStage(uint32_t now)" in source
-    assert "triangleWave(now, 1400, kScanTravel)" in source
+    assert "3 * kStageLineHeight + 4" in source
+    assert "stageScanLines" not in source
+    assert "animateActiveStage" not in source
+    assert source.count("masterArc = makeArc") == 1
 
 
-def test_real_preview_replaces_only_process_rack_and_keeps_master_visible():
+def test_recent_media_uses_three_bounded_right_column_thumbnails():
     source = source_text()
-
-    assert "constexpr uint16_t kPreviewPanelX = 47;" in source
-    assert "constexpr uint16_t kPreviewPanelY = 54;" in source
-    assert "constexpr uint16_t kPreviewPanelWidth = 246;" in source
-    assert "constexpr uint16_t kPreviewPanelHeight = 128;" in source
-    assert "constexpr uint16_t kPreviewDecodedWidth = 140;" in source
-    assert "constexpr uint16_t kPreviewDecodedHeight = 88;" in source
-    assert "lv_obj_add_flag(processRack, LV_OBJ_FLAG_HIDDEN);" in source
-    assert "lv_obj_clear_flag(previewPanel, LV_OBJ_FLAG_HIDDEN);" in source
-    assert "lv_obj_add_flag(masterArc, LV_OBJ_FLAG_HIDDEN);" not in source
+    assert "constexpr uint16_t kThumbnailWidth = 112;" in source
+    assert "constexpr uint16_t kThumbnailHeight = 64;" in source
+    assert "lv_obj_t *thumbnailSlots[3];" in source
+    assert 'stateDocument["recent_media"]' in source
+    assert '"/thumb.jpg"' in source
+    assert "kMaxThumbnailBytes = 16 * 1024" in source
+    assert "thumbnailRetryAt = now + kTakeoverRetryIntervalMs" in source
 
 
 def test_firmware_consumes_normalized_pipeline_without_raw_node_names():
@@ -146,7 +139,7 @@ def test_active_takeover_keeps_one_newest_completion_pending_without_interrupt()
     assert "pendingCompletionSequence = sequence;" in retain
     assert "takeoverKind != TakeoverKind::None" in retry
     assert 'lastMode == "running" && takeoverKind != TakeoverKind::None' not in source
-    assert "takeoverKind == TakeoverKind::None && lastMode == \"running\"" in source
+    assert "takeoverKind == TakeoverKind::None && thumbnailsDirty" in source
 
 
 def test_completion_acknowledgment_occurs_only_after_successful_takeover_start():
@@ -195,8 +188,6 @@ def test_bridge_epoch_change_rebases_sequence_and_clears_pending_without_replay(
 
 def test_render_metadata_and_five_instruments_match_approved_layout():
     source = source_text()
-
-    assert "lv_obj_t *renderMetaStrip;" in source
     for label in ["GPU", "CPU", "VRAM", "RAM", "GPU °C"]:
         assert f'"{label}"' in source
     assert "lv_obj_t *metricBars[5];" in source

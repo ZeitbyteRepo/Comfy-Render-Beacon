@@ -177,7 +177,7 @@ def test_completion_sequence_stays_unconsumed_while_derivative_is_preparing(
         started.set()
         assert release.wait(timeout=5)
         return completed_media.CompletedMedia(
-            media_id, "image", (b"jpeg",), None, 10_000, 1
+            media_id, "image", (b"jpeg",), None, 10_000, 1, b"thumb"
         )
 
     monkeypatch.setattr("render_beacon.observer.build_completed_media", delayed_build)

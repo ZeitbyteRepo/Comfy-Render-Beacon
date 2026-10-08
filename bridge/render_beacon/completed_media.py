@@ -23,6 +23,9 @@ STILL_HOLD_MS = 10_000
 MAX_FRAMES = 24
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
 MAX_FRAME_BYTES = 64 * 1024
+THUMB_WIDTH = 112
+THUMB_HEIGHT = 64
+MAX_THUMB_BYTES = 16 * 1024
 MAX_AUDIO_DURATION_MS = 60 * 60 * 1000
 MAX_AUDIO_SAMPLES = MAX_AUDIO_DURATION_MS * 8
 AUDIO_DECODE_TIMEOUT_SECONDS = 30
@@ -36,6 +39,7 @@ class CompletedMedia:
     duration_ms: int | None
     frame_interval_ms: int
     created_at_ms: int
+    thumbnail: bytes = b""
 
     def descriptor(self) -> dict:
         result = {
@@ -47,6 +51,7 @@ class CompletedMedia:
             "still_hold_ms": STILL_HOLD_MS if self.kind == "image" else None,
             "duration_ms": self.duration_ms,
             "frame_url_template": f"/v2/media/{self.media_id}/frame/{{frame}}.jpg",
+            "thumbnail_url": f"/v2/media/{self.media_id}/thumb.jpg",
         }
         return result
 
@@ -64,25 +69,27 @@ class AtomicMediaCache:
         self._lock = threading.RLock()
 
     def put(self, media: CompletedMedia) -> bool:
-        size = sum(len(frame) for frame in media.frames)
+        size = sum(len(frame) for frame in media.frames) + len(media.thumbnail)
         if (
             not media.frames
             or len(media.frames) > MAX_FRAMES
             or size > self.max_bytes
             or any(len(frame) > MAX_FRAME_BYTES for frame in media.frames)
+            or not media.thumbnail
+            or len(media.thumbnail) > MAX_THUMB_BYTES
         ):
             return False
         with self._lock:
             old = self._items.pop(media.media_id, None)
             if old is not None:
-                self._bytes -= sum(len(frame) for frame in old.frames)
+                self._bytes -= sum(len(frame) for frame in old.frames) + len(old.thumbnail)
             while self._items and (len(self._items) >= self.max_items or self._bytes + size > self.max_bytes):
                 _, evicted = self._items.popitem(last=False)
-                self._bytes -= sum(len(frame) for frame in evicted.frames)
+                self._bytes -= sum(len(frame) for frame in evicted.frames) + len(evicted.thumbnail)
             if self._bytes + size > self.max_bytes:
                 if old is not None:
                     self._items[old.media_id] = old
-                    self._bytes += sum(len(frame) for frame in old.frames)
+                    self._bytes += sum(len(frame) for frame in old.frames) + len(old.thumbnail)
                 return False
             self._items[media.media_id] = media
             self._bytes += size
@@ -97,6 +104,17 @@ class AtomicMediaCache:
         if media is None or index < 0 or index >= len(media.frames):
             return None
         return media.frames[index]
+
+    def thumbnail(self, media_id: str) -> bytes | None:
+        media = self.get(media_id)
+        return media.thumbnail if media is not None and media.thumbnail else None
+
+    def recent_descriptors(self, limit: int = 3) -> list[dict]:
+        with self._lock:
+            bounded = max(0, min(limit, 3))
+            return [item.descriptor() for item in reversed(tuple(self._items.values()))][
+                :bounded
+            ]
 
     @property
     def total_bytes(self) -> int:
@@ -125,6 +143,31 @@ def _jpeg(image: Image.Image, quality: int = 76) -> bytes:
     if len(payload) > MAX_FRAME_BYTES:
         raise ValueError("derived JPEG exceeds frame bound")
     return payload
+
+
+def _thumbnail(frame: bytes) -> bytes:
+    with Image.open(io.BytesIO(frame)) as image:
+        canvas = Image.new("RGB", (THUMB_WIDTH, THUMB_HEIGHT), (12, 15, 20))
+        fitted = ImageOps.contain(image.convert("RGB"), (THUMB_WIDTH, THUMB_HEIGHT))
+        canvas.paste(
+            fitted,
+            ((THUMB_WIDTH - fitted.width) // 2, (THUMB_HEIGHT - fitted.height) // 2),
+        )
+        payload = b""
+        for quality in (68, 50, 35, 20):
+            output = io.BytesIO()
+            canvas.save(
+                output,
+                "JPEG",
+                quality=quality,
+                optimize=True,
+                progressive=False,
+                subsampling=2,
+            )
+            payload = output.getvalue()
+            if len(payload) <= MAX_THUMB_BYTES:
+                return payload
+    raise ValueError("thumbnail JPEG exceeds bound")
 
 
 def still_derivative(source: bytes) -> tuple[bytes, ...]:
@@ -249,9 +292,22 @@ def audio_derivative(source: bytes, suffix: str = ".wav") -> tuple[tuple[bytes, 
 def build_completed_media(media_id: str, kind: MediaKind, source: bytes, suffix: str) -> CompletedMedia:
     created = int(time.time() * 1000)
     if kind == "image":
-        return CompletedMedia(media_id, kind, still_derivative(source), None, STILL_HOLD_MS, created)
+        frames = still_derivative(source)
+        return CompletedMedia(
+            media_id, kind, frames, None, STILL_HOLD_MS, created, _thumbnail(frames[0])
+        )
     if kind == "video":
         frames, duration_ms, interval = video_derivative(source, suffix)
-        return CompletedMedia(media_id, kind, frames, duration_ms, interval, created)
+        return CompletedMedia(
+            media_id, kind, frames, duration_ms, interval, created, _thumbnail(frames[0])
+        )
     frames, duration_ms = audio_derivative(source, suffix)
-    return CompletedMedia(media_id, kind, frames, duration_ms, STILL_HOLD_MS, created)
+    return CompletedMedia(
+        media_id,
+        kind,
+        frames,
+        duration_ms,
+        STILL_HOLD_MS,
+        created,
+        _thumbnail(frames[0]),
+    )

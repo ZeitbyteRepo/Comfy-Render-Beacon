@@ -220,6 +220,57 @@ class ComfyObserver:
                     self._completion_status = "failed"
             return
 
+    async def _warm_recent_media(
+        self, client: httpx.AsyncClient, history: list[dict[str, Any]]
+    ) -> None:
+        """Populate three pre-epoch thumbnails without replaying completions."""
+
+        terminals = [
+            item
+            for item in history
+            if item.get("state") == "complete"
+            and isinstance(item.get("output"), dict)
+            and isinstance(item.get("prompt_id"), str)
+        ][:3]
+        # Install oldest first so cache recency remains newest-first.
+        for terminal in reversed(terminals):
+            safe_output = self._safe_output_params(terminal["output"])
+            if safe_output is None:
+                continue
+            params, source_name = safe_output
+            source_key = f"{terminal['prompt_id']}:{source_name}"
+            media_id = hashlib.sha256(source_key.encode()).hexdigest()[:16]
+            if self._media_cache.get(media_id) is not None:
+                continue
+            filename = params["filename"]
+            kind = terminal.get("media")
+            suffix = Path(filename).suffix.lower()
+            if kind not in ("image", "video", "audio"):
+                if suffix in (".mp4", ".webm", ".mov", ".mkv"):
+                    kind = "video"
+                elif suffix in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
+                    kind = "audio"
+                else:
+                    kind = "image"
+            try:
+                source = bytearray()
+                async with client.stream("GET", "/view", params=params) as response:
+                    response.raise_for_status()
+                    declared = response.headers.get("content-length")
+                    if declared is not None and int(declared) > MAX_SOURCE_BYTES:
+                        raise ValueError("completed source exceeds bound")
+                    async for chunk in response.aiter_bytes(64 * 1024):
+                        source.extend(chunk)
+                        if len(source) > MAX_SOURCE_BYTES:
+                            raise ValueError("completed source exceeds bound")
+                media = await asyncio.to_thread(
+                    build_completed_media, media_id, kind, bytes(source), suffix
+                )
+                self._media_cache.put(media)
+            except Exception:
+                # Historical thumbnails are optional and never take telemetry offline.
+                continue
+
     def _baseline_completed_media(self, history: list[dict[str, Any]]) -> None:
         """Claim bridge-start history without publishing it as a new completion."""
         terminal = next(
@@ -321,8 +372,10 @@ class ComfyObserver:
                 await self._prepare_completed_media(client, history_summary)
             else:
                 # Existing history predates this process epoch. Do not turn it
-                # into a fresh device event after a bridge restart.
+                # into a fresh device event after a bridge restart, but do warm
+                # the bounded visual history used by the three thumbnail slots.
                 self._baseline_completed_media(history_summary)
+                await self._warm_recent_media(client, history_summary)
 
             with self._lock:
                 prior_active = self._state.get("active")
@@ -551,6 +604,7 @@ class ComfyObserver:
                 },
                 "pipeline": deepcopy(active.get("pipeline")) if active else None,
                 "completed_media": completed,
+                "recent_media": self._media_cache.recent_descriptors(3),
                 "telemetry": {
                     "gpu": deepcopy(self._state.get("gpu", {})),
                     "system": deepcopy(self._state.get("system", {})),
@@ -561,6 +615,11 @@ class ComfyObserver:
         if len(media_id) != 16 or any(char not in "0123456789abcdef" for char in media_id):
             return None
         return self._media_cache.frame(media_id, index)
+
+    def media_thumbnail(self, media_id: str) -> bytes | None:
+        if len(media_id) != 16 or any(char not in "0123456789abcdef" for char in media_id):
+            return None
+        return self._media_cache.thumbnail(media_id)
 
     def queue(self) -> dict[str, Any]:
         with self._lock:

@@ -13,6 +13,7 @@ The API is observational only. It exposes no workload mutation routes.
 | `GET` | `/v1/preview.jpg` | Latest bounded JPEG preview, when available |
 | `GET` | `/v2/state` | V2 rail, pipeline, telemetry, and completed-media descriptor |
 | `GET` | `/v2/media/{id}/frame/{n}.jpg` | Bounded completed-media JPEG derivative |
+| `GET` | `/v2/media/{id}/thumb.jpg` | Bounded 112×64 recent-media thumbnail |
 | `POST` | `/v1/state` | Not allowed; must return `405` |
 
 ## State contract
@@ -86,6 +87,12 @@ filenames are never copied into V2. `modality_icon` is the closed enum
 `duration_ms`; no audio-content endpoint exists. The cache installs a complete derivative
 atomically and is bounded to four items, 4 MiB total, 24 video frames, and 65,536 bytes per
 frame. Missing, malformed, oversized, or unknown media fails closed with `404` or no descriptor.
+
+`recent_media` is a newest-first array of at most three descriptors already present in the
+four-item media cache. Each descriptor includes a fixed `/thumb.jpg` URL. Thumbnails are 112×64
+baseline JPEGs, limited to 16 KiB, and derived from frame zero (or the audio waveform card).
+The bridge backfills up to three cacheable completions from bounded ComfyUI history at startup
+without advancing `completion_sequence` or replaying fullscreen completion takeovers.
 
 Each terminal output advances `completion_sequence` once. `completion_status` is `preparing`
 while conversion is in flight and `ready` only after a complete derivative is installed;
