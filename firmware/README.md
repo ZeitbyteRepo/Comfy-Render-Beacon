@@ -33,6 +33,17 @@ Qualified source baseline:
 - RAM: 113,560 bytes of 327,680 bytes (34.7%)
 - application flash: 1,196,157 bytes of 1,310,720 bytes (91.3%)
 
+V2 qualified build:
+
+- RAM: 113,648 bytes of 327,680 bytes (34.7%, below the 40% gate)
+- application flash: 1,198,845 bytes of 1,310,720 bytes (91.5%, below the 95% gate)
+- application-partition slack: 111,875 bytes (above the 64 KiB gate)
+
+V2 polls `/v2/state`, renders the queue/model/icon left rail, and uses one bounded JPEG buffer
+with direct TJpg drawing for completed-media takeover. It does not contain MP4 or audio decoders.
+Stills hold for 10 seconds, video sequences loop exactly three times, and audio uses the
+host-rendered waveform card.
+
 Flashing is deliberately a separate operation. Preserve a rollback image before any approved flash, but never commit that image: a full ESP32 flash backup may include Wi-Fi credentials in NVS.
 
 ## Provision after an approved flash

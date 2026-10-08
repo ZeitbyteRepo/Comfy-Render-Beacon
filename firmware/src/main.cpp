@@ -47,11 +47,22 @@ constexpr uint16_t kPreviewDecodedWidth = 140;
 constexpr uint16_t kPreviewDecodedHeight = 88;
 constexpr uint16_t kPreviewImageX = kPreviewPanelX + (kPreviewPanelWidth - kPreviewDecodedWidth) / 2;
 constexpr uint16_t kPreviewImageY = kPreviewPanelY + (kPreviewPanelHeight - kPreviewDecodedHeight) / 2;
+constexpr uint16_t kV2MainStageX = 110;
+constexpr uint16_t kV2MainStageWidth = 352;
+constexpr uint16_t kV2StageRackX = 10;
+constexpr uint16_t kV2StageBayWidth = 58;
+constexpr uint16_t kV2PreviewPanelWidth = 186;
+constexpr uint16_t kV2MasterX = 226;
+constexpr uint16_t kV2MasterRingSize = 100;
+constexpr uint16_t kV2PreviewImageX = 143;
 constexpr uint32_t kPollIntervalMs = 500;
 constexpr uint32_t kPreviewIntervalMs = 1500;
 constexpr uint32_t kReconnectIntervalMs = 10000;
 constexpr size_t kMaxStateBytes = 16384;
 constexpr size_t kMaxPreviewBytes = 196608;
+constexpr uint8_t kCompletedVideoLoops = 3;
+constexpr uint8_t kMaxCompletedFrames = 24;
+constexpr uint32_t kCompletedCardHoldMs = 10000;
 constexpr char kDefaultBridgeUrl[] = "http://192.168.1.2:8220";
 
 constexpr uint32_t kInk = 0x10120F;
@@ -100,6 +111,10 @@ lv_obj_t *renderTimeValueLabel;
 lv_obj_t *metricValueLabels[5];
 lv_obj_t *metricBars[5];
 lv_obj_t *metricBarFills[5];
+lv_obj_t *leftRail;
+lv_obj_t *railQueueValue;
+lv_obj_t *railModelValue;
+lv_obj_t *modalityIconBars[3];
 
 String wifiSsid;
 String wifiPassword;
@@ -111,6 +126,17 @@ uint32_t lastPreviewAt = 0;
 uint32_t lastReconnectAt = 0;
 int activeStageIndex = -1;
 bool hasLivePreview = false;
+
+enum class TakeoverKind : uint8_t { None, Still, Video, Audio };
+TakeoverKind takeoverKind = TakeoverKind::None;
+String takeoverMediaId;
+String lastCompletedMediaId;
+uint8_t takeoverFrame = 0;
+uint8_t takeoverFrameCount = 0;
+uint8_t takeoverLoops = 0;
+uint32_t takeoverStartedAt = 0;
+uint32_t takeoverNextFrameAt = 0;
+uint32_t takeoverFrameIntervalMs = 500;
 
 std::vector<uint8_t> jpegBytes;
 
@@ -245,53 +271,53 @@ void buildUi() {
   renderTimeValueLabel = makeLabel(screen, 407, 11, 55, &instrument_sans_12, kText, LV_TEXT_ALIGN_RIGHT);
   lv_label_set_text(renderTimeValueLabel, "--:--");
 
-  mainStage = makeBox(screen, kMainStageX, kMainStageY, kMainStageWidth, kMainStageHeight, kSurface);
-  processRack = makeBox(mainStage, kStageRackX, kStageRackY,
-                        3 * kStageBayWidth + 2 * kStageBayGap, kStageBayHeight, kSurface);
+  mainStage = makeBox(screen, kV2MainStageX, kMainStageY, kV2MainStageWidth, kMainStageHeight, kSurface);
+  processRack = makeBox(mainStage, kV2StageRackX, kStageRackY,
+                        3 * kV2StageBayWidth + 2 * kStageBayGap, kStageBayHeight, kSurface);
 
   const char *defaultNames[3] = {"Prepare", "Generate", "Finish"};
   for (size_t index = 0; index < 3; ++index) {
-    const int x = index * (kStageBayWidth + kStageBayGap);
-    stageBays[index] = makeBox(processRack, x, 0, kStageBayWidth, kStageBayHeight, kSurface2);
-    stageTopLines[index] = makeBox(stageBays[index], 0, 0, kStageBayWidth, 2, kTrack);
+    const int x = index * (kV2StageBayWidth + kStageBayGap);
+    stageBays[index] = makeBox(processRack, x, 0, kV2StageBayWidth, kStageBayHeight, kSurface2);
+    stageTopLines[index] = makeBox(stageBays[index], 0, 0, kV2StageBayWidth, 2, kTrack);
     stageIndexLabels[index] = makeLabel(stageBays[index], 7, 5, 18, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_LEFT);
     char indexText[2] = {static_cast<char>('1' + index), '\0'};
     lv_label_set_text(stageIndexLabels[index], indexText);
-    stageArcs[index] = makeArc(stageBays[index], 9, 32, kStageRingSize, 6);
-    stageRingLabels[index] = makeLabel(stageBays[index], 9, 54, kStageRingSize,
+    stageArcs[index] = makeArc(stageBays[index], 4, 35, 50, 5);
+    stageRingLabels[index] = makeLabel(stageBays[index], 4, 53, 50,
                                        &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
     lv_label_set_text(stageRingLabels[index], "0%");
-    stageNameLabels[index] = makeLabel(stageBays[index], 5, 96, kStageBayWidth - 10,
+    stageNameLabels[index] = makeLabel(stageBays[index], 3, 96, kV2StageBayWidth - 6,
                                        &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
     lv_label_set_text(stageNameLabels[index], defaultNames[index]);
-    stageStateLabels[index] = makeLabel(stageBays[index], 5, 111, kStageBayWidth - 10,
+    stageStateLabels[index] = makeLabel(stageBays[index], 3, 111, kV2StageBayWidth - 6,
                                         &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
     lv_label_set_text(stageStateLabels[index], "Waiting");
     stageScanLines[index] = makeBox(stageBays[index], 9, kScanStartY, kStageRingSize, 1, kOrange);
     lv_obj_add_flag(stageScanLines[index], LV_OBJ_FLAG_HIDDEN);
   }
 
-  previewPanel = makeBox(mainStage, kStageRackX, kStageRackY,
-                         kPreviewPanelWidth, kPreviewPanelHeight, kSurface2);
+  previewPanel = makeBox(mainStage, kV2StageRackX, kStageRackY,
+                         kV2PreviewPanelWidth, kPreviewPanelHeight, kSurface2);
   lv_obj_add_flag(previewPanel, LV_OBJ_FLAG_HIDDEN);
-  runDetailLabel = makeLabel(mainStage, kStageRackX, 145, kPreviewPanelWidth,
+  runDetailLabel = makeLabel(mainStage, kV2StageRackX, 145, kV2PreviewPanelWidth,
                              &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(runDetailLabel, "Waiting for pipeline");
 
-  masterArc = makeArc(mainStage, kMasterX, kMasterY, kMasterRingSize, 4);
-  lv_obj_t *masterHub = makeBox(mainStage, 328, 42, 58, 58, kSurface);
+  masterArc = makeArc(mainStage, kV2MasterX, 21, kV2MasterRingSize, 4);
+  lv_obj_t *masterHub = makeBox(mainStage, 247, 42, 58, 58, kSurface);
   lv_obj_set_style_radius(masterHub, LV_RADIUS_CIRCLE, 0);
-  masterValueLabel = makeLabel(mainStage, 328, 48, 58, &instrument_sans_29, kText, LV_TEXT_ALIGN_CENTER);
+  masterValueLabel = makeLabel(mainStage, 247, 48, 58, &instrument_sans_29, kText, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(masterValueLabel, "0%");
-  masterCaption = makeLabel(mainStage, 328, 91, 58, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
+  masterCaption = makeLabel(mainStage, 247, 91, 58, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(masterCaption, "Master flow");
-  activeStageLabel = makeLabel(mainStage, 289, 145, 136, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
+  activeStageLabel = makeLabel(mainStage, 210, 145, 132, &instrument_sans_12, kSecondary, LV_TEXT_ALIGN_CENTER);
   lv_label_set_text(activeStageLabel, "Waiting");
 
-  renderMetaStrip = makeBox(screen, kMainStageX, 219, kMainStageWidth, 29, kOrange);
-  modelLabel = makeLabel(renderMetaStrip, 10, 8, 190, &instrument_sans_12, kInk, LV_TEXT_ALIGN_LEFT);
+  renderMetaStrip = makeBox(screen, kV2MainStageX, 219, kV2MainStageWidth, 29, kOrange);
+  modelLabel = makeLabel(renderMetaStrip, 10, 8, 130, &instrument_sans_12, kInk, LV_TEXT_ALIGN_LEFT);
   lv_label_set_text(modelLabel, "No active model");
-  renderSpecsLabel = makeLabel(renderMetaStrip, 200, 8, 234, &instrument_sans_12, kInk, LV_TEXT_ALIGN_RIGHT);
+  renderSpecsLabel = makeLabel(renderMetaStrip, 140, 8, 202, &instrument_sans_12, kInk, LV_TEXT_ALIGN_RIGHT);
   lv_label_set_text(renderSpecsLabel, "Waiting for render metadata");
 
   const char *metricNames[5] = {"GPU", "CPU", "VRAM", "RAM", "GPU °C"};
@@ -305,6 +331,51 @@ void buildUi() {
     metricBars[index] = makeBox(screen, x, 286, 80, 4, kTrack);
     lv_obj_set_size(metricBars[index], 80, 4);
     metricBarFills[index] = makeBox(metricBars[index], 0, 0, 0, 4, metricColors[index]);
+  }
+
+  // V2's left rail contains exactly queue, curated model name, and a
+  // firmware-owned modality icon. There is intentionally no modality label.
+  leftRail = makeBox(screen, 0, 45, 92, 203, 0x151813);
+  lv_obj_t *queueCaption = makeLabel(leftRail, 10, 10, 72, &instrument_sans_12, kMuted, LV_TEXT_ALIGN_LEFT);
+  lv_label_set_text(queueCaption, "Queue");
+  railQueueValue = makeLabel(leftRail, 10, 28, 72, &instrument_sans_29, kText, LV_TEXT_ALIGN_LEFT);
+  lv_label_set_text(railQueueValue, "0");
+  railModelValue = makeLabel(leftRail, 10, 82, 72, &instrument_sans_12, kText, LV_TEXT_ALIGN_LEFT);
+  lv_label_set_long_mode(railModelValue, LV_LABEL_LONG_DOT);
+  lv_label_set_text(railModelValue, "Unknown model");
+  for (size_t index = 0; index < 3; ++index) {
+    modalityIconBars[index] = makeBox(leftRail, 10 + index * 10, 154, 6, 20, kMuted);
+  }
+}
+
+void updateRail(JsonObjectConst rail) {
+  const int running = rail["queue"]["running"] | 0;
+  const int pending = rail["queue"]["pending"] | 0;
+  char queueText[12];
+  snprintf(queueText, sizeof(queueText), "%d", running + pending);
+  lv_label_set_text(railQueueValue, queueText);
+  const char *model = rail["model_name"] | "Unknown model";
+  lv_label_set_text(railModelValue, model);
+  const char *icon = rail["modality_icon"] | "unknown";
+  if (strcmp(icon, "audio") == 0) {
+    const int heights[3] = {10, 24, 16};
+    for (size_t index = 0; index < 3; ++index) {
+      lv_obj_set_pos(modalityIconBars[index], 10 + index * 10, 164 - heights[index] / 2);
+      lv_obj_set_size(modalityIconBars[index], 6, heights[index]);
+      setObjectColor(modalityIconBars[index], kLime);
+    }
+  } else if (strcmp(icon, "video") == 0) {
+    for (size_t index = 0; index < 3; ++index) {
+      lv_obj_set_pos(modalityIconBars[index], 10 + index * 8, 154 + index * 4);
+      lv_obj_set_size(modalityIconBars[index], 8, 16 - index * 4);
+      setObjectColor(modalityIconBars[index], kOrange);
+    }
+  } else {
+    for (size_t index = 0; index < 3; ++index) {
+      lv_obj_set_pos(modalityIconBars[index], 10, 152 + index * 9);
+      lv_obj_set_size(modalityIconBars[index], index == 1 ? 26 : 20, 4);
+      setObjectColor(modalityIconBars[index], strcmp(icon, "image") == 0 ? kBlue : kMuted);
+    }
   }
 }
 
@@ -442,11 +513,33 @@ void updateTelemetry(JsonDocument &document) {
   updateMetric(4, temperature * 100 / 90, value);
 }
 
+void updateTelemetryV2(JsonDocument &document) {
+  char value[20];
+  JsonObjectConst telemetry = document["telemetry"].as<JsonObjectConst>();
+  const int gpuPercent = telemetry["gpu"]["utilization_percent"] | 0;
+  snprintf(value, sizeof(value), "%d%%", gpuPercent);
+  updateMetric(0, gpuPercent, value);
+  const int cpuPercentValue = telemetry["system"]["cpu_percent"] | 0;
+  snprintf(value, sizeof(value), "%d%%", cpuPercentValue);
+  updateMetric(1, cpuPercentValue, value);
+  const int vramUsed = telemetry["gpu"]["memory_used_mib"] | 0;
+  const int vramTotal = telemetry["gpu"]["memory_total_mib"] | 0;
+  snprintf(value, sizeof(value), "%.1fG", vramUsed / 1024.0f);
+  updateMetric(2, vramTotal > 0 ? vramUsed * 100 / vramTotal : 0, value);
+  const uint64_t ramUsed = telemetry["system"]["ram_used_bytes"] | static_cast<uint64_t>(0);
+  const uint64_t ramTotal = telemetry["system"]["ram_total_bytes"] | static_cast<uint64_t>(0);
+  snprintf(value, sizeof(value), "%.1fG", ramUsed / 1073741824.0f);
+  updateMetric(3, ramTotal > 0 ? static_cast<int>(ramUsed * 100 / ramTotal) : 0, value);
+  const int temperature = telemetry["gpu"]["temperature_c"] | 0;
+  snprintf(value, sizeof(value), "%d°", temperature);
+  updateMetric(4, temperature * 100 / 90, value);
+}
+
 bool jpegBlock(int16_t x, int16_t y, uint16_t width, uint16_t height, uint16_t *bitmap) {
   if (x >= kPreviewDecodedWidth || y >= kPreviewDecodedHeight) return false;
   const uint16_t drawWidth = std::min<uint16_t>(width, kPreviewDecodedWidth - x);
   const uint16_t drawHeight = std::min<uint16_t>(height, kPreviewDecodedHeight - y);
-  tft.pushImage(kPreviewImageX + x, kPreviewImageY + y, drawWidth, drawHeight, bitmap);
+  tft.pushImage(kV2PreviewImageX + x, kPreviewImageY + y, drawWidth, drawHeight, bitmap);
   return true;
 }
 
@@ -485,6 +578,99 @@ bool fetchPreview() {
   TJpgDec.setJpgScale(2);
   TJpgDec.setCallback(jpegBlock);
   return TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+}
+
+bool fullScreenJpegBlock(int16_t x, int16_t y, uint16_t width, uint16_t height,
+                         uint16_t *bitmap) {
+  if (x >= kScreenWidth || y >= kScreenHeight) return false;
+  const uint16_t drawWidth = std::min<uint16_t>(width, kScreenWidth - x);
+  const uint16_t drawHeight = std::min<uint16_t>(height, kScreenHeight - y);
+  tft.pushImage(x, y, drawWidth, drawHeight, bitmap);
+  return true;
+}
+
+bool fetchTakeoverFrame(uint8_t frame) {
+  if (WiFi.status() != WL_CONNECTED || takeoverMediaId.length() != 16) return false;
+  const String url = bridgeUrl + "/v2/media/" + takeoverMediaId + "/frame/" + String(frame) + ".jpg";
+  HTTPClient request;
+  request.setTimeout(3500);
+  if (!request.begin(url)) return false;
+  const int status = request.GET();
+  const int length = request.getSize();
+  if (status != HTTP_CODE_OK || length <= 0 || static_cast<size_t>(length) > kMaxPreviewBytes) {
+    request.end();
+    return false;
+  }
+  jpegBytes.resize(length);  // The sole JPEG buffer serves live and completed media.
+  WiFiClient *stream = request.getStreamPtr();
+  size_t offset = 0;
+  const uint32_t deadline = millis() + 4000;
+  while (offset < jpegBytes.size() && millis() < deadline) {
+    const size_t available = stream->available();
+    if (available) {
+      offset += stream->readBytes(jpegBytes.data() + offset,
+                                  std::min(available, jpegBytes.size() - offset));
+    } else {
+      delay(1);
+    }
+  }
+  request.end();
+  if (offset != jpegBytes.size()) return false;
+  TJpgDec.setJpgScale(1);
+  TJpgDec.setCallback(fullScreenJpegBlock);
+  return TJpgDec.drawJpg(0, 0, jpegBytes.data(), jpegBytes.size()) == JDR_OK;
+}
+
+void endTakeover() {
+  takeoverKind = TakeoverKind::None;
+  takeoverMediaId = "";
+  lv_obj_invalidate(lv_scr_act());
+  lv_refr_now(nullptr);
+}
+
+void beginTakeover(JsonObjectConst media, uint32_t now) {
+  const char *mediaId = media["id"] | "";
+  const char *kind = media["kind"] | "";
+  const int frames = media["frame_count"] | 0;
+  const int loopCount = media["loop_count"] | 0;
+  if (strlen(mediaId) != 16 || frames < 1 || frames > kMaxCompletedFrames) return;
+  if (strcmp(kind, "video") == 0 && loopCount != kCompletedVideoLoops) return;
+  takeoverKind = strcmp(kind, "video") == 0
+                     ? TakeoverKind::Video
+                     : (strcmp(kind, "audio") == 0 ? TakeoverKind::Audio : TakeoverKind::Still);
+  takeoverMediaId = mediaId;
+  takeoverFrameCount = static_cast<uint8_t>(frames);
+  takeoverFrame = 0;
+  takeoverLoops = 0;
+  takeoverStartedAt = now;
+  takeoverFrameIntervalMs = std::max<uint32_t>(40, media["frame_interval_ms"] | 500);
+  takeoverNextFrameAt = now + takeoverFrameIntervalMs;
+  tft.fillScreen(TFT_BLACK);
+  if (!fetchTakeoverFrame(0)) {
+    endTakeover();
+    return;
+  }
+  lastCompletedMediaId = takeoverMediaId;
+}
+
+void advanceTakeover(uint32_t now) {
+  if (takeoverKind == TakeoverKind::None) return;
+  if (takeoverKind != TakeoverKind::Video) {
+    if (now - takeoverStartedAt >= kCompletedCardHoldMs) endTakeover();
+    return;
+  }
+  if (static_cast<int32_t>(now - takeoverNextFrameAt) < 0) return;
+  takeoverNextFrameAt = now + takeoverFrameIntervalMs;
+  ++takeoverFrame;
+  if (takeoverFrame >= takeoverFrameCount) {
+    takeoverFrame = 0;
+    ++takeoverLoops;
+    if (takeoverLoops >= kCompletedVideoLoops) {
+      endTakeover();
+      return;
+    }
+  }
+  if (!fetchTakeoverFrame(takeoverFrame)) endTakeover();
 }
 
 int hexNibble(char value) {
@@ -539,7 +725,7 @@ void handleSerialProvisioning() {
 void updateState() {
   HTTPClient request;
   request.setTimeout(3000);
-  if (!request.begin(bridgeUrl + "/v1/state")) return;
+  if (!request.begin(bridgeUrl + "/v2/state")) return;
   const int status = request.GET();
   if (status != HTTP_CODE_OK) {
     request.end();
@@ -559,16 +745,19 @@ void updateState() {
     return;
   }
 
+  if ((stateDocument["schema_version"] | 0) != 2) {
+    lastMode = "offline";
+    showProcessRack();
+    showEmptyPipeline("unsupported bridge schema");
+    return;
+  }
   lastMode = String(stateDocument["mode"] | "idle");
   const char *clock = stateDocument["clock"] | "--:--";
   lv_label_set_text(clockValueLabel, clock);
-  const char *promptId = stateDocument["active"]["prompt_id"] | "";
-  if (lastPromptId != promptId) {
-    lastPromptId = promptId;
-    showProcessRack();
-  }
+  updateRail(stateDocument["rail"].as<JsonObjectConst>());
+  if (lastMode == "running" && takeoverKind != TakeoverKind::None) endTakeover();
 
-  JsonObjectConst pipeline = stateDocument["active"]["pipeline"].as<JsonObjectConst>();
+  JsonObjectConst pipeline = stateDocument["pipeline"].as<JsonObjectConst>();
   if (!pipeline.isNull()) {
     updatePipeline(pipeline);
   } else {
@@ -576,7 +765,14 @@ void updateState() {
     showEmptyPipeline(lastMode == "offline" ? "bridge unavailable" : "Waiting");
     lv_label_set_text(renderTimeValueLabel, "--:--");
   }
-  updateTelemetry(stateDocument);
+  updateTelemetryV2(stateDocument);
+
+  JsonObjectConst completed = stateDocument["completed_media"].as<JsonObjectConst>();
+  const char *completedId = completed["id"] | "";
+  if (lastMode == "completed" && takeoverKind == TakeoverKind::None &&
+      strlen(completedId) == 16 && lastCompletedMediaId != completedId) {
+    beginTakeover(completed, millis());
+  }
 }
 
 String configPage(const String &message = "") {
@@ -687,8 +883,12 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
   handleSerialProvisioning();
-  lv_timer_handler();
-  animateActiveStage(now);
+  if (takeoverKind == TakeoverKind::None) {
+    lv_timer_handler();
+    animateActiveStage(now);
+  } else {
+    advanceTakeover(now);
+  }
   configServer.handleClient();
 
   if (WiFi.status() == WL_CONNECTED) {

@@ -97,25 +97,32 @@ def build_pipeline(active: dict[str, Any], prior_master_percent: int = 0) -> dic
     }
 
 
-def _family(model: str | None) -> str | None:
+MODEL_REGISTRY = (
+    ("minimax_h3", "MiniMax H3"),
+    ("qwen_image_edit", "Qwen Image Edit"),
+    ("qwen_image", "Qwen Image"),
+    ("z_image", "Z-Image"),
+    ("ideogram", "Ideogram"),
+    ("krea", "Krea"),
+    ("flux", "Flux"),
+    ("ltx", "LTX"),
+    ("wan", "Wan"),
+)
+
+
+def normalize_model_name(model: str | None) -> str:
+    """Return only a curated display label; unknown checkpoint names fail closed."""
     if not model:
-        return None
+        return "Unknown model"
     lowered = model.lower()
-    families = (
-        ("minimax_h3", "MiniMax H3"),
-        ("qwen_image_edit", "Qwen Image Edit"),
-        ("qwen_image", "Qwen Image"),
-        ("z_image", "Z-Image"),
-        ("ideogram", "Ideogram"),
-        ("krea", "Krea"),
-        ("flux", "Flux"),
-        ("ltx", "LTX"),
-        ("wan", "Wan"),
-    )
-    for marker, label in families:
+    for marker, label in MODEL_REGISTRY:
         if marker in lowered:
             return label
-    return model.rsplit("/", 1)[-1].split(".", 1)[0]
+    return "Unknown model"
+
+
+def _family(model: str | None) -> str:
+    return normalize_model_name(model)
 
 
 def infer_graph(graph: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +174,7 @@ def infer_graph(graph: dict[str, Any]) -> dict[str, Any]:
         elif ("saveimage" in lowered or "previewimage" in lowered) and result["media"] == "unknown":
             result["media"] = "image"
     result["family"] = _family(result["model"])
+    result["model"] = result["family"]
     return result
 
 

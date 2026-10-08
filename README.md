@@ -26,7 +26,8 @@ ComfyUI
 Render Beacon bridge
   ├─ normalizes queue, history, progress, system, and GPU state
   ├─ strips prompt text and full workflow graphs
-  └─ bounds and resizes the latest JPEG preview
+  ├─ maps checkpoints through a fail-closed display-name registry
+  └─ creates bounded completed-media JPEG derivatives
           │
           ▼
 ESP32 over the local network
@@ -44,8 +45,14 @@ The bridge exposes only:
 - `GET /v1/queue`
 - `GET /v1/history?limit=N`
 - `GET /v1/preview.jpg`
+- `GET /v2/state`
+- `GET /v2/media/{id}/frame/{n}.jpg`
 
 It has no queue, interrupt, delete, upload, prompt-submission, workflow-mutation, or GPU-control route. OpenAPI and interactive documentation are disabled. Full prompt text and full workflow graphs are not returned.
+
+Completed video/audio conversion requires host `ffmpeg` and `ffprobe`. The ESP32 receives only
+baseline JPEGs: it never decodes MP4 or audio. See [`docs/api.md`](docs/api.md) for bounds and
+takeover timing.
 
 ## Bridge development
 

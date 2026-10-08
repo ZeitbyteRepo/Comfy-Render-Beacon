@@ -77,13 +77,35 @@ def test_firmware_consumes_normalized_pipeline_without_raw_node_names():
     assert "DynamicJsonDocument stateDocument(kMaxStateBytes);" in source
     assert "StaticJsonDocument<kMaxStateBytes> stateDocument;" not in source
     assert "StaticJsonDocument<kMaxStateBytes> document;" not in source
-    assert 'stateDocument["active"]["pipeline"]' in source
+    assert 'stateDocument["pipeline"]' in source
     assert '["master_percent"]' in source
     assert '["active_stage"]' in source
     assert '["stages"]' in source
     assert '["metadata"]' in source
     assert "void updatePipeline(JsonObjectConst pipeline)" in source
     assert "node_class" not in source
+
+
+def test_v2_left_rail_is_queue_model_and_icon_only():
+    source = source_text()
+    assert 'lv_label_set_text(queueCaption, "Queue")' in source
+    assert 'rail["model_name"]' in source
+    assert 'rail["modality_icon"]' in source
+    assert "modalityIconBars[3]" in source
+    assert "modalityLabel" not in source
+    assert "modality_label" not in source
+
+
+def test_completed_takeover_uses_one_jpeg_buffer_and_exact_loop_contract():
+    source = source_text()
+    assert source.count("std::vector<uint8_t> jpegBytes;") == 1
+    assert "constexpr uint8_t kCompletedVideoLoops = 3;" in source
+    assert "takeoverLoops >= kCompletedVideoLoops" in source
+    assert "kCompletedCardHoldMs = 10000" in source
+    assert "TJpgDec.setCallback(fullScreenJpegBlock);" in source
+    assert '"/v2/media/"' in source
+    assert "MP4" not in source
+    assert "AudioFile" not in source
 
 
 def test_render_metadata_and_five_instruments_match_approved_layout():

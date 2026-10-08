@@ -20,7 +20,7 @@ def test_infer_graph_reports_render_settings_without_prompt_text():
 
     summary = infer_graph(graph)
 
-    assert summary["model"] == "z_image_turbo_bf16.safetensors"
+    assert summary["model"] == "Z-Image"
     assert summary["family"] == "Z-Image"
     assert summary["width"] == 1024
     assert summary["height"] == 768
@@ -78,6 +78,18 @@ class StaticObserver:
     def health(self):
         return {"status": "ok", "comfy_reachable": True, "read_only": True}
 
+    def state_v2(self):
+        return {
+            "schema_version": 2,
+            "read_only": True,
+            "mode": "idle",
+            "rail": {"queue": {"running": 0, "pending": 0}, "model_name": "Unknown model", "modality_icon": "unknown"},
+            "completed_media": None,
+        }
+
+    def media_frame(self, media_id: str, index: int):
+        return b"jpeg" if media_id == "0123456789abcdef" and index == 0 else None
+
 
 def test_api_exposes_only_read_routes():
     client = TestClient(create_app(StaticObserver()))
@@ -87,10 +99,19 @@ def test_api_exposes_only_read_routes():
     assert client.get("/v1/queue").status_code == 200
     assert client.get("/v1/history?limit=3").status_code == 200
     assert client.get("/v1/preview.jpg").status_code == 404
+    assert client.get("/v2/state").json()["schema_version"] == 2
+    assert client.get("/v2/media/0123456789abcdef/frame/0.jpg").content == b"jpeg"
     for path in ["/v1/state", "/v1/queue", "/v1/history", "/v1/preview.jpg"]:
         assert client.post(path).status_code == 405
     for forbidden in ["prompt", "interrupt", "free", "clear", "delete", "transition"]:
         assert client.post(f"/v1/{forbidden}").status_code == 404
+
+
+def test_unknown_checkpoint_fails_closed_without_filename_leakage():
+    result = infer_graph({"1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "private/customer/model-v9.safetensors"}}})
+    assert result["model"] == "Unknown model"
+    assert result["family"] == "Unknown model"
+    assert "private" not in json.dumps(result)
 
 
 def test_observer_merges_live_read_only_sources():

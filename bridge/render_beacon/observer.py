@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import struct
@@ -14,6 +15,7 @@ from typing import Any, Callable
 import httpx
 from PIL import Image, ImageOps
 
+from .completed_media import MAX_SOURCE_BYTES, AtomicMediaCache, build_completed_media
 from .summarize import build_pipeline, cpu_percent, read_cpu_sample, summarize_history, summarize_queue
 
 CommandRunner = Callable[[list[str]], str]
@@ -50,6 +52,7 @@ class ComfyObserver:
         command_runner: CommandRunner = _run,
         system_reader: SystemReader = _read_system,
         gpu_manager_path: str | None = None,
+        media_cache: AtomicMediaCache | None = None,
     ) -> None:
         self.comfy_url = comfy_url.rstrip("/")
         self._http = http_client
@@ -57,6 +60,9 @@ class ComfyObserver:
         self._run = command_runner
         self._read_system = system_reader
         self._gpu_manager_path = gpu_manager_path
+        self._media_cache = media_cache or AtomicMediaCache()
+        self._completed_media: dict[str, Any] | None = None
+        self._completed_source_key: str | None = None
         self._lock = threading.RLock()
         self._queue = {"running_count": 0, "pending_count": 0, "running": [], "pending": []}
         self._history: list[dict[str, Any]] = []
@@ -89,6 +95,61 @@ class ComfyObserver:
         if self._owns_http and self._http is not None:
             await self._http.aclose()
             self._http = None
+
+    async def _prepare_completed_media(
+        self, client: httpx.AsyncClient, history: list[dict[str, Any]]
+    ) -> None:
+        terminal = next(
+            (item for item in history if item.get("state") == "complete" and isinstance(item.get("output"), dict)),
+            None,
+        )
+        if terminal is None:
+            return
+        output = terminal["output"]
+        filename = output.get("filename")
+        prompt_id = terminal.get("prompt_id")
+        if not isinstance(filename, str) or not isinstance(prompt_id, str):
+            return
+        source_key = f"{prompt_id}:{output.get('type', 'output')}:{output.get('subfolder', '')}:{filename}"
+        if source_key == self._completed_source_key:
+            return
+        kind = terminal.get("media")
+        suffix = Path(filename).suffix.lower()
+        if kind not in ("image", "video", "audio"):
+            if suffix in (".mp4", ".webm", ".mov", ".mkv"):
+                kind = "video"
+            elif suffix in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
+                kind = "audio"
+            else:
+                kind = "image"
+        try:
+            params = {
+                "filename": filename,
+                "subfolder": output.get("subfolder", ""),
+                "type": output.get("type", "output"),
+            }
+            source = bytearray()
+            async with client.stream("GET", "/view", params=params) as response:
+                response.raise_for_status()
+                declared = response.headers.get("content-length")
+                if declared is not None and int(declared) > MAX_SOURCE_BYTES:
+                    raise ValueError("completed source exceeds bound")
+                async for chunk in response.aiter_bytes(64 * 1024):
+                    source.extend(chunk)
+                    if len(source) > MAX_SOURCE_BYTES:
+                        raise ValueError("completed source exceeds bound")
+            media_id = hashlib.sha256(source_key.encode()).hexdigest()[:16]
+            media = await asyncio.to_thread(
+                build_completed_media, media_id, kind, bytes(source), suffix
+            )
+            if self._media_cache.put(media):
+                with self._lock:
+                    self._completed_media = media.descriptor()
+                    self._completed_source_key = source_key
+        except Exception:
+            # Completion media is optional; malformed/unavailable outputs must not
+            # take the telemetry observer offline.
+            return
 
     async def refresh_once(self) -> None:
         client = await self._client()
@@ -167,6 +228,8 @@ class ComfyObserver:
                             next_preview_sequence = sequence
             except Exception:
                 pass
+
+            await self._prepare_completed_media(client, history_summary)
 
             with self._lock:
                 prior_active = self._state.get("active")
@@ -356,6 +419,50 @@ class ComfyObserver:
     def state(self) -> dict[str, Any]:
         with self._lock:
             return deepcopy(self._state)
+
+    def state_v2(self) -> dict[str, Any]:
+        with self._lock:
+            active_value = self._state.get("active")
+            active: dict[str, Any] = active_value if isinstance(active_value, dict) else {}
+            queue_value = self._state.get("queue")
+            queue: dict[str, Any] = queue_value if isinstance(queue_value, dict) else {}
+            model_name = str(active.get("family") or active.get("model") or "Unknown model")[:24]
+            if model_name not in {
+                "MiniMax H3", "Qwen Image Edit", "Qwen Image", "Z-Image", "Ideogram",
+                "Krea", "Flux", "LTX", "Wan", "Unknown model",
+            }:
+                model_name = "Unknown model"
+            modality = active.get("media")
+            if modality not in ("image", "video", "audio"):
+                modality = "unknown"
+            mode = self._state.get("mode", "offline")
+            completed = deepcopy(self._completed_media) if mode in ("complete", "idle") else None
+            return {
+                "schema_version": 2,
+                "read_only": True,
+                "mode": {"complete": "completed", "failed": "error"}.get(mode, mode),
+                "clock": self._state.get("clock"),
+                "updated_at_ms": self._state.get("updated_at_ms"),
+                "rail": {
+                    "queue": {
+                        "running": int(queue.get("running_count") or 0),
+                        "pending": int(queue.get("pending_count") or 0),
+                    },
+                    "model_name": model_name,
+                    "modality_icon": modality,
+                },
+                "pipeline": deepcopy(active.get("pipeline")) if active else None,
+                "completed_media": completed,
+                "telemetry": {
+                    "gpu": deepcopy(self._state.get("gpu", {})),
+                    "system": deepcopy(self._state.get("system", {})),
+                },
+            }
+
+    def media_frame(self, media_id: str, index: int) -> bytes | None:
+        if len(media_id) != 16 or any(char not in "0123456789abcdef" for char in media_id):
+            return None
+        return self._media_cache.frame(media_id, index)
 
     def queue(self) -> dict[str, Any]:
         with self._lock:

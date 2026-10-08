@@ -11,6 +11,8 @@ class Observer(Protocol):
     def queue(self) -> dict: ...
     def history(self, limit: int) -> list: ...
     def preview(self) -> bytes | None: ...
+    def state_v2(self) -> dict: ...
+    def media_frame(self, media_id: str, index: int) -> bytes | None: ...
 
 
 def create_app(observer: Observer) -> FastAPI:
@@ -38,5 +40,22 @@ def create_app(observer: Observer) -> FastAPI:
         if payload is None:
             raise HTTPException(status_code=404, detail="No preview available")
         return Response(payload, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.get("/v2/state")
+    def state_v2() -> dict:
+        return observer.state_v2()
+
+    @app.get("/v2/media/{media_id}/frame/{index}.jpg")
+    def media_frame(media_id: str, index: int) -> Response:
+        if index < 0 or index > 23:
+            raise HTTPException(status_code=404, detail="Media frame not found")
+        payload = observer.media_frame(media_id, index)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Media frame not found")
+        return Response(
+            payload,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+        )
 
     return app
