@@ -20,7 +20,7 @@ Registration is deliberately fixed at 1 MHz:
 SD.begin(5, sdSpi, 1000000U, "/sd", 5, false)
 ```
 
-The final `false` forbids format-on-mount. The probe contains no format, write, rename, create, or delete path. Absence of the optional test file is reported as `NOT PRESENT (optional)` and does not fail registration. If the file exists but cannot be opened as a regular readable file, the probe fails.
+The final `false` forbids format-on-mount. The probe application invokes no format, write, rename, create, or delete APIs. The linked Arduino SD/FS libraries may still contain dormant mutation-capable symbols; their presence does not mean the probe application calls them. Absence of the optional test file is reported as `NOT PRESENT (optional)` and does not fail registration. If the file exists but cannot be opened as a regular readable file, the probe fails.
 
 ## Mechanical qualification (no device access)
 
@@ -32,7 +32,7 @@ cd firmware
 pio run -e sd-readonly-probe
 ```
 
-The static contract tests enforce target isolation, the exact pin/order/mount call, absence of known mutation and serial APIs, the bounded optional read, PASS/FAIL TFT fields, and retention of the documented reset-pin concern. PlatformIO compilation qualifies the exact ESP32/Arduino/TFT_eSPI dependency graph. Build output is under `firmware/.pio/build/sd-readonly-probe/`; `.pio` is ignored and must not be committed.
+The static contract tests enforce target isolation, the exact pin/order/mount call, no direct application-source invocation of known mutation or serial APIs, the bounded optional read, truthful PASS/FAIL TFT fields, and retention of the documented reset-pin concern. PlatformIO compilation qualifies the exact ESP32/Arduino/TFT_eSPI dependency graph. Binary symbol inspection is expected to find dormant mutation-capable SD/FS library symbols and must not be used to claim those library paths are absent. Build output is under `firmware/.pio/build/sd-readonly-probe/`; `.pio` is ignored and must not be committed.
 
 A passing build is not permission to connect, reset, open serial, or flash hardware.
 

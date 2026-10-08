@@ -44,7 +44,7 @@ def test_probe_uses_audited_hspi_wiring_and_registration_parameters():
     assert cs_high < spi_class < spi_begin < mount
 
 
-def test_probe_compiles_no_format_write_delete_or_serial_path():
+def test_probe_source_invokes_no_format_write_delete_or_serial_api():
     source = probe_source()
 
     forbidden = [
@@ -94,7 +94,11 @@ def test_probe_has_bounded_tft_pass_fail_output_and_documented_rst_audit():
     assert '"Card type"' in source
     assert '"Capacity"' in source
     assert '"Root directory"' in source
+    assert '"Probe invokes no format/write/delete APIs"' in source
+    stale_claim = "no format/write/delete paths " + "compiled"
+    assert stale_claim not in source
     assert "delay(1000);" in source
     assert "-D TFT_RST=12" in config
     assert "vendor definition uses `TFT_RST=-1`" in docs
+    assert "dormant mutation-capable symbols" in docs
     assert "unresolved" in docs.lower()

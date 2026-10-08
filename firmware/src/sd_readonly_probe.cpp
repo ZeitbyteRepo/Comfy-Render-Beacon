@@ -159,7 +159,7 @@ void showResult(const ProbeResult &result) {
   tft.setTextSize(1);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   tft.setCursor(18, 284);
-  tft.print("One-shot registration only - no format/write/delete paths compiled");
+  tft.print("Probe invokes no format/write/delete APIs");
   tft.setCursor(18, 300);
   tft.print("Power-cycle and restore production firmware after recording result");
 }
